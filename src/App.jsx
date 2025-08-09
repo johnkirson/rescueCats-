@@ -27,12 +27,12 @@ export const CAT_PER_STATE_SCALE = { idle:1.00, attached:1.00, falling:1.00, sea
 export const CAT_Y_NUDGE_PX = { idle:0, attached:0, falling:0, seated:0 };
 
 // ——— Rope scaling (X/Y) ———
-export const ROPE_SCALE_X = 1.00; // width relative to screen width
+export const ROPE_SCALE_X = 1.30; // width relative to screen width
 export const ROPE_SCALE_Y = 1.00; // vertical stretch of entire fire.png
 
 // ——— Drop behavior ———
-export const DROP_TRAVEL_BELOW_PX = 10;  // carry distance below threshold before release
-export const DROP_MIN_TIME_MS = 200;     // minimum time below threshold before release
+export const DROP_TRAVEL_BELOW_PX = 100;  // carry distance below threshold before release
+export const DROP_MIN_TIME_MS = 800;     // minimum time below threshold before release
 // =======================================================
 
 const SPRITES = {
@@ -241,3 +241,4 @@ export default function PullUpRescueV54(){
 
 function btn(opacity=1,bg){ return {border:0,borderRadius:14,padding:'10px 12px',background:bg||'rgba(255,255,255,.12)',color:'#fff',opacity,backdropFilter:'saturate(120%) blur(6px)'}; }
 function Labeled({label,children}){ return (<div><div style={{fontSize:11,opacity:.75,marginBottom:4}}>{label}</div>{children}</div>); }
+
