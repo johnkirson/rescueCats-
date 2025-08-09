@@ -27,7 +27,7 @@ import "@tensorflow/tfjs-converter";
  */
 
 // ===================== CALIBRATION =====================
-const ROPE_BASELINE_FROM_BOTTOM = 0.35; // where the rope baseline is inside fire.png (0..1 from bottom)
+const ROPE_BASELINE_FROM_BOTTOM = 0.33; // where the rope baseline is inside fire.png (0..1 from bottom)
 const CAT_BASELINE_ABOVE_ROPE_PX = 0;  // cat feet above the rope baseline (device px)
 const DEFAULT_SENSITIVITY = 24;         // threshold above rope (device px). Slider changes this.
 const INFER_EVERY_MS = 70;              // pose estimation cadence (~14Hz)
@@ -217,6 +217,7 @@ export default function PullUpRescueV49(){
 
 function btn(opacity=1,bg){ return {border:0,borderRadius:14,padding:'10px 12px',background:bg||'rgba(255,255,255,.12)',color:'#fff',opacity,backdropFilter:'saturate(120%) blur(6px)'}; }
 function Labeled({label,children}){ return (<div><div style={{fontSize:11,opacity:.75,marginBottom:4}}>{label}</div>{children}</div>); }
+
 
 
 
