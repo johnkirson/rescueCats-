@@ -5,32 +5,47 @@ import "@tensorflow/tfjs-backend-webgl";
 import "@tensorflow/tfjs-converter";
 
 /**
- * v4.9 — POSE ALIGNMENT FIX (iOS/front/back)
+ * v5.0 — Sprite sizing controls
  *
- * Root cause:
- *  - We ran MoveNet on a downscaled offscreen canvas (inferCanvas),
- *    drawing the video with letterboxing (scale=s, offsets ix/iy).
- *  - The returned keypoints are in the inferCanvas coordinate space.
- *  - We previously multiplied keypoints by the display scale directly,
- *    ignoring ix/iy and s — hence the pose drifted.
- *
- * Fix:
- *  - Convert keypoints from inferCanvas → video pixel space:
- *        x_v = (x_infer - ix) / s
- *        y_v = (y_infer - iy) / s
- *  - Then convert video → display canvas:
- *        x_d = dx + (mirrored ? (vw - x_v) : x_v) * displayScale
- *        y_d = dy + y_v * displayScale
- *  - Store infer mapping (s, ix, iy) per frame and apply to all kps.
- *
- * Also kept calibration knobs at the top, with comments.
+ * Added a single global size for ALL cat sprites + optional per‑state overrides
+ * (scale and Y‑nudge). Everything is documented in CALIBRATION block.
+ * Also set your chosen rope/cat baselines as defaults.
+ * Uses v4.9 pose mapping fix under the hood.
  */
 
 // ===================== CALIBRATION =====================
-const ROPE_BASELINE_FROM_BOTTOM = 0.33; // where the rope baseline is inside fire.png (0..1 from bottom)
-const CAT_BASELINE_ABOVE_ROPE_PX = 0;  // cat feet above the rope baseline (device px)
-const DEFAULT_SENSITIVITY = 24;         // threshold above rope (device px). Slider changes this.
-const INFER_EVERY_MS = 70;              // pose estimation cadence (~14Hz)
+// ——— Visual alignment ———
+export const ROPE_BASELINE_FROM_BOTTOM = 0.33; // chosen by you: where the rope baseline is inside fire.png (0..1 from bottom)
+export const CAT_BASELINE_ABOVE_ROPE_PX = 0;    // chosen by you: cat feet above the rope baseline (device px)
+export const DEFAULT_SENSITIVITY = 24;          // threshold above rope (device px). Slider changes this.
+export const INFER_EVERY_MS = 70;               // pose estimation cadence (~14Hz)
+
+// ——— Sprite sizing (NEW) ———
+/**
+ * Global size: base logical width (in CSS px) for ALL cat sprites at scale=1.
+ * Final on‑screen width = BASE * GLOBAL_SCALE * PER_STATE_SCALE[state] * DPR.
+ *
+ * Change only CAT_BASE_WIDTH_PX and/or CAT_GLOBAL_SCALE if вы хотите менять всё сразу.
+ * Потом тонко подправить каждый спрайт можно через CAT_PER_STATE_SCALE и CAT_Y_NUDGE_PX.
+ */
+export const CAT_BASE_WIDTH_PX = 64;     // base logical width for cat sprites
+export const CAT_GLOBAL_SCALE = 1.0;     // multiply ALL cat sprites at once
+
+/** Optional per‑state scale multipliers (relative to global). */
+export const CAT_PER_STATE_SCALE = {
+  idle: 1.00,
+  attached: 1.00,
+  falling: 1.00,
+  seated: 0.80,   // seated a bit smaller by default
+};
+
+/** Optional per‑state Y nudges in device px (applied after baseline calc). */
+export const CAT_Y_NUDGE_PX = {
+  idle: 0,
+  attached: 0,
+  falling: 0,
+  seated: 0,
+};
 // =======================================================
 
 const SPRITES = {
@@ -44,13 +59,12 @@ const SPRITES = {
 const MOVENET_EDGES = { 0:[0,1],1:[1,3],2:[0,2],3:[2,4],4:[5,7],5:[7,9],6:[6,8],7:[8,10],8:[5,6],9:[5,11],10:[6,12],11:[11,12],12:[11,13],13:[13,15],14:[12,14],15:[14,16] };
 function updateRepState(prev, isAbove, now, minAboveMs = 160, minIntervalMs = 420){ const next={...prev}; let counted=0; if(prev.phase==='down'&&isAbove){next.phase='up'; next.lastAbove=now;} else if(prev.phase==='up'&&!isAbove){ if(now-prev.lastAbove>minAboveMs && now-prev.lastRepAt>minIntervalMs){ next.phase='down'; next.lastRepAt=now; counted=1;} else { next.phase='down'; } } return {next, counted}; }
 
-export default function PullUpRescueV49(){
+export default function PullUpRescueV50(){
   const videoRef = useRef(null); const baseRef=useRef(null); const uiRef=useRef(null); const recRef=useRef(null);
   const detectorRef=useRef(null); const rafRef=useRef(null); const streamRef=useRef(null);
   const inferCanvasRef=useRef(document.createElement('canvas'));
-  const inferMapRef=useRef({s:1, ix:0, iy:0}); // <— NEW: remembers inferCanvas transform
+  const inferMapRef=useRef({s:1, ix:0, iy:0});
 
-  // UI state
   const [camReady,setCamReady]=useState(false);
   const [bucketMap,setBucketMap]=useState({ultra:null,wide:null,front:null});
   const [bucketChoice,setBucketChoice]=useState('ultra');
@@ -109,12 +123,11 @@ export default function PullUpRescueV49(){
 
     // Pose inference while recording
     const now=performance.now(); if(recordingRef.current && detectorRef.current){ if(now - lastInferRef.current >= INFER_EVERY_MS){ lastInferRef.current=now; const ic=inC.getContext('2d'); const s=Math.max(inC.width/vw, inC.height/vh); const iw=vw*s, ih=vh*s; const ix=(inC.width-iw)/2, iy=(inC.height-ih)/2; inferMapRef.current={s,ix,iy}; ic.clearRect(0,0,inC.width,inC.height); ic.drawImage(video, ix, iy, iw, ih); try{ const poses=await detectorRef.current.estimatePoses(inC,{maxPoses:1,flipHorizontal:false}); lastPoseRef.current = poses && poses[0] ? poses[0] : null; }catch(e){} }
-      const pose = lastPoseRef.current; if(pose){ const kps=pose.keypoints; // map each kp from infer→video→display
-        const {s,ix,iy}=inferMapRef.current; const mapped=kps.map((kp)=>{ const xv=(kp.x-ix)/s; const yv=(kp.y-iy)/s; const xd = dx + (mirrored ? (vw - xv) : xv) * scale; const yd = dy + yv * scale; return {X:xd,Y:yd,score:kp.score, raw:{xv,yv}}; });
+      const pose = lastPoseRef.current; if(pose){ const kps=pose.keypoints; const {s,ix,iy}=inferMapRef.current; const mapped=kps.map((kp)=>{ const xv=(kp.x-ix)/s; const yv=(kp.y-iy)/s; const xd = dx + (mirrored ? (vw - xv) : xv) * scale; const yd = dy + yv * scale; return {X:xd,Y:yd,score:kp.score, raw:{xv,yv}}; });
         if(showPose){ u.save(); u.strokeStyle='rgba(255,255,255,.9)'; u.lineWidth=2; drawPoseMapped(u,mapped); u.restore(); }
         const nose = mapped[0]; const by=barYRef.current; const sens=sensitivityRef.current; if(nose?.score>0.4 && by!==null){ const thr=by - sens; const above = nose.Y <= thr; const {next}=updateRepState(repRef.current,above,now); const wasAttached = catRef.current.mode==='attached'; repRef.current=next; if(above && catRef.current.mode==='idle'){ catRef.current.mode='attached'; }
           if(!above && wasAttached && next.phase==='down' && catRef.current.mode==='attached'){ startCatFall(); }
-          if(catRef.current.mode==='attached'){ const p=window.devicePixelRatio||1; catRef.current.x = nose.X; catRef.current.y = by - CAT_BASELINE_ABOVE_ROPE_PX*p; }
+          if(catRef.current.mode==='attached'){ const p=window.devicePixelRatio||1; const catY = by - CAT_BASELINE_ABOVE_ROPE_PX*p; catRef.current.x = nose.X; catRef.current.y = catY + (CAT_Y_NUDGE_PX.attached||0)*p; }
         }
       }
     }
@@ -133,12 +146,17 @@ export default function PullUpRescueV49(){
 
   function drawRopeSprite(ctx,W,H,y,img){ if(!img||y==null) return; const scaleW = W / img.width; const renderW = W; const renderH = img.height * scaleW; const baseline = renderH * (1 - ROPE_BASELINE_FROM_BOTTOM); const yTop = Math.round(y - baseline); ctx.drawImage(img, 0, yTop, renderW, renderH); }
 
-  function spawnCatCentered(){ const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const W=u.width; const y=barYRef.current ?? Math.floor(u.height*0.5); catRef.current={ mode:'idle', x:Math.floor(W/2), y:y - CAT_BASELINE_ABOVE_ROPE_PX*p, vx:0, vy:0, lastT:performance.now() }; }
+  // ---- CAT SIZING HELPERS (NEW) ----
+  function catWidthPx(state){ const dpr=window.devicePixelRatio||1; const local=(CAT_PER_STATE_SCALE[state] ?? 1)*CAT_GLOBAL_SCALE; return CAT_BASE_WIDTH_PX * local * dpr; }
+  function catHeightFor(img, w){ return w * (img.height/img.width); }
+
+  // Cats
+  function spawnCatCentered(){ const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const W=u.width; const y=barYRef.current ?? Math.floor(u.height*0.5); catRef.current={ mode:'idle', x:Math.floor(W/2), y:y - CAT_BASELINE_ABOVE_ROPE_PX*p + (CAT_Y_NUDGE_PX.idle||0)*p, vx:0, vy:0, lastT:performance.now() }; }
   function startCatFall(){ const now=performance.now(); const c=catRef.current; c.mode='falling'; c.vx=(Math.random()*2-1)*24; c.vy=0; c.lastT=now; }
   function stepActiveCat(){ const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const H=u.height; const groundY=H-28*p; const c=catRef.current; const now=performance.now(); const dt=Math.min(0.05,(now-c.lastT)/1000); c.lastT=now; if(c.mode==='falling'){ const g=1200*p; c.vy += g*dt; c.y += c.vy*dt; c.x += c.vx*dt; if(c.y >= groundY){ c.y=groundY; c.mode='seated'; const seat = placeSeatedCat(u); seatedCatsRef.current.push(seat); setSaved(v=>v+1); setTimeout(()=>{ spawnCatCentered(); }, 250); } } }
   function placeSeatedCat(u){ const p=window.devicePixelRatio||1; const W=u.width; const H=u.height; const margin=20*p; const spacing=56*p; const baseY=H-28*p; const count=seatedCatsRef.current.length; const maxPerRow=Math.floor((W-2*margin)/spacing); const row=Math.floor(count/maxPerRow); const col=count%maxPerRow; const x=margin + col*spacing; const y=baseY - row*spacing*0.75; return {x,y}; }
-  function drawSeatedCats(ctx,imgs){ ctx.save(); const p=window.devicePixelRatio||1; const im = imgs.cat_seated; if(!im){ ctx.restore(); return; } const w=48*p, h=w*(im.height/im.width); for(const s of seatedCatsRef.current){ ctx.drawImage(im, Math.round(s.x - w/2), Math.round(s.y - h), w, h); } ctx.restore(); }
-  function drawActiveCat(ctx,imgs){ stepActiveCat(); const c=catRef.current; if(!c) return; const p=window.devicePixelRatio||1; const im = c.mode==='attached' ? imgs.cat_attached : (c.mode==='falling' ? imgs.cat_jump : imgs.cat_idle); const w=64*p, h=w*(im.height/im.width); ctx.drawImage(im, Math.round(c.x - w/2), Math.round(c.y - h), w, h); }
+  function drawSeatedCats(ctx,imgs){ const im = imgs.cat_seated; if(!im) return; const w = catWidthPx('seated'); const h = catHeightFor(im,w); for(const s of seatedCatsRef.current){ const dpr=window.devicePixelRatio||1; const yNudge=(CAT_Y_NUDGE_PX.seated||0)*dpr; ctx.drawImage(im, Math.round(s.x - w/2), Math.round(s.y - h + yNudge), w, h); } }
+  function drawActiveCat(ctx,imgs){ const c=catRef.current; stepActiveCat(); if(!c) return; const state = c.mode==='attached' ? 'attached' : (c.mode==='falling' ? 'falling' : 'idle'); const im = state==='attached' ? imgs.cat_attached : (state==='falling' ? imgs.cat_jump : imgs.cat_idle); if(!im) return; const w = catWidthPx(state); const h = catHeightFor(im,w); const dpr=window.devicePixelRatio||1; const yNudge=(CAT_Y_NUDGE_PX[state]||0)*dpr; ctx.drawImage(im, Math.round(c.x - w/2), Math.round(c.y - h + yNudge), w, h); }
 
   function drawSavedCounter(ctx,W,H,val){ const p=window.devicePixelRatio||1; const pad=14*p; const boxW=140*p, boxH=56*p; const x=W - boxW - pad, y=pad; ctx.fillStyle='rgba(0,0,0,.35)'; ctx.fillRect(x,y,boxW,boxH); ctx.font=`${14*p}px system-ui`; ctx.fillStyle='#fff'; ctx.fillText('Saved', x+12*p, y+20*p); ctx.font=`${26*p}px system-ui`; ctx.fillText(`${val}`, x+12*p, y+44*p); }
   function drawThreshold(ctx,W,H,barY,sensitivity){ if(barY==null) return; const p=window.devicePixelRatio||1; const thr=barY - sensitivity; ctx.save(); ctx.setLineDash([16*p, 10*p]); ctx.lineWidth=4*p; ctx.strokeStyle='#00ff88'; ctx.beginPath(); ctx.moveTo(0,thr); ctx.lineTo(W,thr); ctx.stroke(); ctx.setLineDash([]); ctx.beginPath(); ctx.arc(W-40*p,thr,10*p,0,Math.PI*2); ctx.fillStyle='#00ff88'; ctx.fill(); ctx.restore(); }
@@ -217,16 +235,3 @@ export default function PullUpRescueV49(){
 
 function btn(opacity=1,bg){ return {border:0,borderRadius:14,padding:'10px 12px',background:bg||'rgba(255,255,255,.12)',color:'#fff',opacity,backdropFilter:'saturate(120%) blur(6px)'}; }
 function Labeled({label,children}){ return (<div><div style={{fontSize:11,opacity:.75,marginBottom:4}}>{label}</div>{children}</div>); }
-
-
-
-
-
-
-
-
-
-
-
-
-
