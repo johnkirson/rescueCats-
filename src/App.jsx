@@ -4,7 +4,17 @@ import * as tf from "@tensorflow/tfjs-core";
 import "@tensorflow/tfjs-backend-webgl";
 import "@tensorflow/tfjs-converter";
 
-// ---------------- Helper drawing functions ----------------
+/**
+ * Pull‑Up Rescue — v3
+ * - One‑screen minimalist UI
+ * - Defaults to rear camera (environment), toggle to front
+ * - Single render surface (no duplicated video on iPhone)
+ * - Full‑viewport canvas, controls overlay; no scroll
+ * - Bar line: thick, high‑contrast, draggable; thickness & color controls
+ * - Responsive to devicePixelRatio; crisp drawing
+ */
+
+// ---- Drawing helpers ----
 function drawKeypoints(ctx, keypoints, scale = 1) {
   keypoints.forEach((kp) => {
     if (kp.score && kp.score > 0.3) {
@@ -40,6 +50,7 @@ const MOVENET_EDGES = {
   12: [11, 13], 13: [13, 15], 14: [12, 14], 15: [14, 16]
 };
 
+// ---- Rep state machine ----
 function updateRepState(prev, isAbove, now, minAboveMs = 200, minIntervalMs = 500) {
   const next = { ...prev };
   let counted = 0;
@@ -48,180 +59,394 @@ function updateRepState(prev, isAbove, now, minAboveMs = 200, minIntervalMs = 50
   } else if (prev.phase === "up" && !isAbove) {
     if (now - prev.lastAbove > minAboveMs && now - prev.lastRepAt > minIntervalMs) {
       next.phase = "down"; next.lastRepAt = now; counted = 1;
-    } else { next.phase = "down"; }
+    } else {
+      next.phase = "down";
+    }
   }
   return { next, counted };
 }
 
-export default function App() {
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null);
-  const overlayRef = useRef(null);
-  const recCanvasRef = useRef(null);
+export default function PullUpRescueV3() {
+  // DOM refs
+  const videoRef = useRef(null);     // hidden video source only
+  const baseRef = useRef(null);      // base canvas (webcam + pose)
+  const uiRef = useRef(null);        // UI canvas (house, line, cats)
+  const recRef = useRef(null);       // hidden canvas for recording composite
 
-  const mediaRecorderRef = useRef(null);
-  const recordedChunksRef = useRef([]);
+  // Engine refs
   const detectorRef = useRef(null);
   const rafRef = useRef(null);
+  const streamRef = useRef(null);
 
+  // UI state
+  const [cats, setCats] = useState(0);
   const [detecting, setDetecting] = useState(false);
   const [recording, setRecording] = useState(false);
-  const [cats, setCats] = useState(0);
+  const [canRecord, setCanRecord] = useState(false);
+  const [msg, setMsg] = useState("Tap or drag the bar to calibrate");
+
+  // Camera state
+  const [facingMode, setFacingMode] = useState("environment"); // default rear camera
+
+  // Threshold line
   const [barY, setBarY] = useState(null);
   const [sensitivity, setSensitivity] = useState(24);
-  const [msg, setMsg] = useState("Tap the bar location to calibrate");
-  const [canRecord, setCanRecord] = useState(false);
+  const [lineWidth, setLineWidth] = useState(6);
+  const [lineColor, setLineColor] = useState("#00ff88");
+  const draggingRef = useRef(false);
 
-  const repStateRef = useRef({ phase: "down", lastAbove: 0, lastRepAt: 0 });
+  // Rep state
+  const repRef = useRef({ phase: "down", lastAbove: 0, lastRepAt: 0 });
+
+  // Rescued cats particles
   const [rescues, setRescues] = useState([]);
 
+  // Feature detect recording
   useEffect(() => {
-    const tmpCanvas = document.createElement("canvas");
-    const hasCapture = typeof tmpCanvas.captureStream === "function";
-    const hasRecorder = typeof window !== "undefined" && "MediaRecorder" in window;
-    setCanRecord(hasCapture && hasRecorder);
+    const c = document.createElement("canvas");
+    setCanRecord(typeof c.captureStream === "function" && "MediaRecorder" in window);
   }, []);
 
+  // Setup camera + detector
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        if (!navigator.mediaDevices?.getUserMedia) { setMsg("Camera API not available."); return; }
-        await tf.setBackend("webgl"); await tf.ready();
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+        await tf.setBackend("webgl");
+        await tf.ready();
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false,
+        });
         if (cancelled) return;
-        const video = videoRef.current; video.srcObject = stream; await video.play();
-        detectorRef.current = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, { modelType: "Lightning" });
-        if (!cancelled) setMsg("Tap the bar on screen, then Start");
-      } catch (e) { console.error(e); if (!cancelled) setMsg("Init failed. Check permissions."); }
+        streamRef.current = stream;
+        const video = videoRef.current;
+        video.srcObject = stream;
+        await video.play();
+
+        // Create detector once
+        if (!detectorRef.current) {
+          detectorRef.current = await poseDetection.createDetector(
+            poseDetection.SupportedModels.MoveNet,
+            { modelType: "Lightning" }
+          );
+        }
+
+        // Start ticker
+        cancelAnimationFrame(rafRef.current || 0);
+        rafRef.current = requestAnimationFrame(tick);
+        setMsg("Drag the bar to your pull‑up bar height, then Start");
+      } catch (e) {
+        console.error(e);
+        setMsg("Camera init failed. Allow camera and reload.");
+      }
     })();
+
     return () => {
       cancelled = true;
       cancelAnimationFrame(rafRef.current || 0);
-      if (videoRef.current?.srcObject) { videoRef.current.srcObject.getTracks().forEach((t) => t.stop()); }
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") { mediaRecorderRef.current.stop(); }
+      const s = streamRef.current;
+      if (s) s.getTracks().forEach((t) => t.stop());
     };
+  }, [facingMode]);
+
+  // Resize canvases to viewport & devicePixelRatio
+  useEffect(() => {
+    const resize = () => {
+      const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+      const W = window.innerWidth;
+      const H = window.innerHeight;
+      [baseRef.current, uiRef.current, recRef.current].forEach((cv) => {
+        if (!cv) return;
+        cv.style.width = W + "px";
+        cv.style.height = H + "px";
+        cv.width = Math.floor(W * dpr);
+        cv.height = Math.floor(H * dpr);
+      });
+    };
+    resize();
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
   }, []);
 
+  // Main loop
   const tick = async () => {
-    const video = videoRef.current, canvas = canvasRef.current, overlay = overlayRef.current, recCanvas = recCanvasRef.current;
-    if (!video || !canvas || !overlay) return;
-    const vw = video.videoWidth, vh = video.videoHeight;
-    if (vw === 0 || vh === 0) { rafRef.current = requestAnimationFrame(tick); return; }
-    if (canvas.width !== vw || canvas.height !== vh) { canvas.width = vw; canvas.height = vh; overlay.width = vw; overlay.height = vh; if (recCanvas) { recCanvas.width = vw; recCanvas.height = vh; } }
-    const ctx = canvas.getContext("2d"), octx = overlay.getContext("2d");
-    ctx.save(); ctx.scale(-1, 1); ctx.drawImage(video, -vw, 0, vw, vh); ctx.restore();
+    const video = videoRef.current;
+    const base = baseRef.current;
+    const ui = uiRef.current;
+    if (!video || !base || !ui) return;
+
+    const bctx = base.getContext("2d");
+    const uctx = ui.getContext("2d");
+
+    const W = base.width;
+    const H = base.height;
+
+    // Draw video (cover)
+    // Compute cover rect for drawing video into base canvas
+    const vw = video.videoWidth || 1280;
+    const vh = video.videoHeight || 720;
+    const scale = Math.max(W / vw, H / vh);
+    const dw = vw * scale;
+    const dh = vh * scale;
+    const dx = (W - dw) / 2;
+    const dy = (H - dh) / 2;
+
+    bctx.save();
+    // Mirror only for front camera so it feels natural
+    if (facingMode === "user") {
+      bctx.translate(W, 0); bctx.scale(-1, 1);
+      bctx.drawImage(video, dx - (W - 2*dx), dy, dw, dh);
+    } else {
+      bctx.drawImage(video, dx, dy, dw, dh);
+    }
+    bctx.restore();
+
     if (detecting && detectorRef.current) {
-      const poses = await detectorRef.current.estimatePoses(video, { maxPoses: 1, flipHorizontal: true });
+      const poses = await detectorRef.current.estimatePoses(video, {
+        maxPoses: 1,
+        flipHorizontal: facingMode === "user",
+      });
       if (poses[0]) {
         const kps = poses[0].keypoints.map((kp) => ({ ...kp }));
-        drawSkeleton(ctx, kps, MOVENET_EDGES, 1); drawKeypoints(ctx, kps, 1);
+        drawSkeleton(bctx, kps, MOVENET_EDGES, 1);
+        drawKeypoints(bctx, kps, 1);
+
         const nose = kps[0];
         if (nose?.score > 0.4 && barY !== null) {
-          const threshold = barY - sensitivity; const now = performance.now();
+          const threshold = barY - sensitivity;
+          const now = performance.now();
           const above = nose.y <= threshold;
-          const { next, counted } = updateRepState(repStateRef.current, above, now);
-          repStateRef.current = next; if (counted) { setCats((c) => c + 1); spawnRescue(); }
-          ctx.strokeStyle = "#00ff88"; ctx.lineWidth = 3; ctx.setLineDash([10,8]);
-          ctx.beginPath(); ctx.moveTo(0, threshold); ctx.lineTo(vw, threshold); ctx.stroke(); ctx.setLineDash([]);
+          const { next, counted } = updateRepState(repRef.current, above, now);
+          repRef.current = next;
+          if (counted) { setCats((c) => c + 1); spawnRescue(); }
         }
       }
     }
-    octx.clearRect(0, 0, overlay.width, overlay.height); drawHouse(octx, overlay, cats);
-    rescues.forEach((r) => { octx.font = "48px system-ui"; octx.textAlign = "center"; octx.fillText("🐱", r.x, r.y); });
-    if (recording && recCanvas) { const rctx = recCanvas.getContext("2d"); rctx.clearRect(0,0,recCanvas.width,recCanvas.height); rctx.drawImage(canvas,0,0); rctx.drawImage(overlay,0,0); }
+
+    // UI overlay
+    uctx.clearRect(0, 0, W, H);
+    drawHouse(uctx, W, H, cats);
+    drawBar(uctx, W, H, barY, sensitivity, lineWidth, lineColor);
+    drawRescues(uctx, rescues);
+
     rafRef.current = requestAnimationFrame(tick);
   };
-  useEffect(() => { rafRef.current = requestAnimationFrame(tick); return () => cancelAnimationFrame(rafRef.current || 0); });
 
-  const onCanvasClick = (e) => { const rect = canvasRef.current.getBoundingClientRect(); const y = e.clientY - rect.top; setBarY(y); setMsg("Bar set. Press Start to detect."); };
-  const startDetect = () => { setDetecting(true); setMsg("Detecting pull-ups…"); };
+  // UI drawings
+  function drawHouse(ctx, W, H, cats) {
+    const houseW = Math.min(200, W * 0.22);
+    const houseH = houseW * 0.75;
+    const x = 16 * (window.devicePixelRatio || 1);
+    const y = H - houseH - 16 * (window.devicePixelRatio || 1);
+    ctx.fillStyle = "rgba(0,0,0,0.35)"; ctx.fillRect(x, y, houseW, houseH);
+    ctx.beginPath(); ctx.moveTo(x - 10, y); ctx.lineTo(x + houseW/2, y - 40); ctx.lineTo(x + houseW + 10, y); ctx.closePath();
+    ctx.fillStyle = "rgba(0,0,0,0.45)"; ctx.fill();
+    ctx.font = `${20 * (window.devicePixelRatio || 1)}px system-ui`;
+    ctx.fillStyle = "white"; ctx.fillText(`${cats} saved`, x, y - 12);
+  }
+
+  function drawBar(ctx, W, H, barY, sensitivity, width, color) {
+    if (barY == null) return;
+    const thr = barY - sensitivity;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(2, width);
+    ctx.setLineDash([16, 10]);
+    ctx.beginPath(); ctx.moveTo(0, thr); ctx.lineTo(W, thr); ctx.stroke();
+    ctx.setLineDash([]);
+    // grip circle
+    ctx.beginPath(); ctx.arc(W - 40 * (window.devicePixelRatio || 1), thr, 10 * (window.devicePixelRatio || 1), 0, Math.PI * 2);
+    ctx.fillStyle = color; ctx.fill();
+    ctx.restore();
+  }
+
+  function drawRescues(ctx, items) {
+    items.forEach((r) => {
+      ctx.font = `${48 * (window.devicePixelRatio || 1)}px system-ui`;
+      ctx.textAlign = "center";
+      ctx.fillText("🐱", r.x, r.y);
+    });
+  }
+
+  function spawnRescue() {
+    const W = uiRef.current.width; const H = uiRef.current.height;
+    const startX = 60 * (window.devicePixelRatio || 1);
+    const startY = H - 120 * (window.devicePixelRatio || 1);
+    const id = Math.random().toString(36).slice(2);
+    const created = { id, x: startX, y: startY };
+    setRescues((arr) => [...arr, created]);
+    const start = performance.now(); const dur = 900;
+    const step = (t) => {
+      const p = Math.min(1, (t - start) / dur);
+      const nx = startX + (W * 0.35) * p;
+      const ny = startY - (H * 0.35) * p;
+      setRescues((arr) => arr.map((r) => (r.id === id ? { ...r, x: nx, y: ny } : r)));
+      if (p < 1) requestAnimationFrame(step);
+      else setTimeout(() => setRescues((arr) => arr.filter((r) => r.id !== id)), 150);
+    };
+    requestAnimationFrame(step);
+  }
+
+  // Pointer handling for draggable bar
+  function onPointerDown(e) {
+    const y = getY(e); if (y == null) return;
+    setBarY(y);
+    draggingRef.current = true;
+  }
+  function onPointerMove(e) {
+    if (!draggingRef.current) return;
+    const y = getY(e); if (y == null) return;
+    setBarY(y);
+  }
+  function onPointerUp() { draggingRef.current = false; }
+  function getY(e) {
+    const rect = uiRef.current.getBoundingClientRect();
+    const dpr = uiRef.current.width / rect.width;
+    if (e.touches && e.touches[0]) return (e.touches[0].clientY - rect.top) * dpr;
+    if (e.changedTouches && e.changedTouches[0]) return (e.changedTouches[0].clientY - rect.top) * dpr;
+    if (typeof e.clientY === 'number') return (e.clientY - rect.top) * dpr;
+    return null;
+  }
+
+  // Camera switch
+  async function toggleCamera() {
+    try {
+      setFacingMode((m) => (m === "environment" ? "user" : "environment"));
+      setTimeout(() => setMsg("Camera switched"), 0);
+    } catch (e) { console.error(e); setMsg("Camera switch failed"); }
+  }
+
+  // Controls: start/pause detect
+  const startDetect = () => { setDetecting(true); setMsg("Detecting pull‑ups…"); };
   const stopDetect = () => { setDetecting(false); setMsg("Paused"); };
 
-  const startRecording = () => {
-    try {
-      const recCanvas = recCanvasRef.current; if (!recCanvas) throw new Error("Recorder canvas missing");
-      if (!("captureStream" in recCanvas)) throw new Error("captureStream unsupported");
-      if (!("MediaRecorder" in window)) throw new Error("MediaRecorder unsupported");
-      const mime = getBestMime(); if (!mime) throw new Error("No supported MIME for MediaRecorder");
-      recordedChunksRef.current = []; const stream = recCanvas.captureStream(30);
-      const mr = new MediaRecorder(stream, { mimeType: mime });
-      mr.ondataavailable = (e) => { if (e.data.size > 0) recordedChunksRef.current.push(e.data); };
-      mr.onstop = () => { const type = mr.mimeType || mime; const blob = new Blob(recordedChunksRef.current, { type }); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; const ts = new Date().toISOString().replace(/[:.]/g, "-"); const ext = type.includes("webm") ? "webm" : type.includes("mp4") ? "mp4" : "webm"; a.download = `pullup-rescue-${ts}.${ext}`; a.click(); setMsg("Recording saved"); };
-      mediaRecorderRef.current = mr; mr.start(); setRecording(true); setMsg("Recording…");
-    } catch (e) { console.error(e); setMsg(e.message || "Recording not supported on this device/browser."); }
-  };
-  const stopRecording = () => { if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") { mediaRecorderRef.current.stop(); } setRecording(false); };
-
+  // Recording (composite base+ui)
+  const mediaRecorderRef = useRef(null);
+  const recordedChunksRef = useRef([]);
   function getBestMime() {
     const options = ["video/webm;codecs=vp9,opus","video/webm;codecs=vp8,opus","video/webm","video/mp4"];
     for (const opt of options) { try { if (window.MediaRecorder && MediaRecorder.isTypeSupported(opt)) return opt; } catch {} }
     return "";
   }
+  function startRecording() {
+    if (!canRecord) return;
+    const rec = recRef.current, base = baseRef.current, ui = uiRef.current;
+    if (!rec || !base || !ui) return;
+    const rctx = rec.getContext("2d");
+    const mime = getBestMime(); if (!mime) { setMsg("No supported recording format"); return; }
+    recordedChunksRef.current = [];
+    const stream = rec.captureStream(30);
+    const mr = new MediaRecorder(stream, { mimeType: mime });
+    mr.ondataavailable = (e) => e.data.size > 0 && recordedChunksRef.current.push(e.data);
+    mr.onstop = () => {
+      const type = mr.mimeType || mime; const blob = new Blob(recordedChunksRef.current, { type });
+      const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url;
+      const ts = new Date().toISOString().replace(/[:.]/g, "-");
+      a.download = `pullup-rescue-${ts}.${type.includes('webm')?'webm':'mp4'}`; a.click();
+      setMsg("Recording saved");
+    };
+    mediaRecorderRef.current = mr;
+    setRecording(true); setMsg("Recording…");
 
-  function drawHouse(ctx, overlay, cats) {
-    const w = overlay.width, h = overlay.height; const houseW = Math.min(180, w * 0.22); const houseH = houseW * 0.75; const x = 20; const y = h - houseH - 20;
-    ctx.fillStyle = "rgba(0,0,0,0.35)"; ctx.fillRect(x, y, houseW, houseH);
-    ctx.beginPath(); ctx.moveTo(x - 10, y); ctx.lineTo(x + houseW / 2, y - 40); ctx.lineTo(x + houseW + 10, y); ctx.closePath(); ctx.fillStyle = "rgba(0,0,0,0.45)"; ctx.fill();
-    ctx.fillStyle = "rgba(255,255,255,0.9)"; ctx.fillRect(x + houseW * 0.65, y + houseH * 0.4, houseW * 0.2, houseH * 0.45);
-    ctx.font = "28px system-ui"; ctx.fillText("🐾", x + houseW * 0.75, y + houseH * 0.38);
-    const label = `${cats} saved`; ctx.font = "20px system-ui"; const tw = ctx.measureText(label).width + 24; ctx.fillStyle = "rgba(0,0,0,0.65)"; ctx.fillRect(x, y - 36, tw, 28); ctx.fillStyle = "white"; ctx.fillText(label, x + 12, y - 16);
+    // composite loop
+    const comp = () => { if (!recording) return; rctx.clearRect(0,0,rec.width,rec.height); rctx.drawImage(base,0,0); rctx.drawImage(ui,0,0); requestAnimationFrame(comp); };
+    requestAnimationFrame(comp);
+    mr.start();
   }
-  function spawnRescue() { const overlay = overlayRef.current; const w = overlay.width, h = overlay.height; const startX = 20 + Math.min(180, w * 0.22) * 0.75; const startY = h - Math.min(180, w * 0.22) * 0.75 - 20 + Math.min(180, w * 0.22) * 0.4; const id = Math.random().toString(36).slice(2); const created = { id, x: startX, y: startY }; setRescues((arr) => [...arr, created]); const start = performance.now(), dur = 900; const step = (t) => { const p = Math.min(1, (t - start) / dur); const nx = startX + (w * 0.35) * p; const ny = startY - (h * 0.4) * p; setRescues((arr) => arr.map((r) => (r.id === id ? { ...r, x: nx, y: ny } : r))); if (p < 1) requestAnimationFrame(step); else setTimeout(() => setRescues((arr) => arr.filter((r) => r.id !== id)), 200); }; requestAnimationFrame(step); }
+  function stopRecording() {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") mediaRecorderRef.current.stop();
+    setRecording(false);
+  }
 
-  // Tiny console tests
-  useEffect(() => {
-    function simulate(seq) { let state = { phase: "down", lastAbove: 0, lastRepAt: 0 }; let count = 0; for (const [t, above] of seq) { const out = updateRepState(state, above, t); state = out.next; count += out.counted; } return count; }
-    const seq1 = [[0,false],[100,false],[120,true],[380,true],[400,false],[900,false]]; // 1
-    const seq2 = [[0,false],[100,true],[250,false],[500,false]]; // 0
-    const seq3 = [[0,false],[50,true],[300,false],[900,false],[950,true],[1300,false],[2000,false]]; // 2
-    const seq4 = [[0,false],[50,true],[300,false],[650,true],[800,false]]; // 1
-    console.assert(simulate(seq1) === 1, "Test1 failed");
-    console.assert(simulate(seq2) === 0, "Test2 failed");
-    console.assert(simulate(seq3) === 2, "Test3 failed");
-    console.assert(simulate(seq4) === 1, "Test4 failed");
-    console.log("RepCounter tests: ok");
-  }, []);
-
+  // ---- Minimal layout (no scroll) ----
   return (
-    <div style={{ minHeight:'100vh', background:'#000', color:'#fff' }}>
-      <div className="container">
-        <h1 style={{ fontSize:24, fontWeight:600 }}>Pull‑Up Rescue 🐱</h1>
-        <p style={{ opacity:.8, fontSize:14 }}>Open in iPhone Safari. Tap the bar to calibrate. Nose must go above, hold ~200ms, then go below. 500ms debounce.</p>
-        <div className="card">
-          <div style={{ position:'relative', width:'100%' }}>
-            <video ref={videoRef} className="hidden" playsInline muted />
-            <canvas ref={canvasRef} onClick={onCanvasClick} style={{ width:'100%', borderRadius:16, boxShadow:'0 8px 24px rgba(0,0,0,.4)' }} />
-            <canvas ref={overlayRef} style={{ pointerEvents:'none', position:'absolute', inset:0, width:'100%', height:'100%' }} />
-            <canvas ref={recCanvasRef} className="hidden" />
-            {barY !== null && (
-              <div style={{ position:'absolute', left:0, right:0, top: barY - sensitivity, borderTop:'2px solid #00ff88', pointerEvents:'none' }} />
-            )}
-          </div>
-          <div style={{ marginTop:12, display:'grid', gap:8, gridTemplateColumns:'repeat(4, minmax(0,1fr))' }}>
-            {!detecting ? (
-              <button className="btn" onClick={startDetect}>Start</button>
-            ) : (
-              <button className="btn" onClick={stopDetect}>Pause</button>
-            )}
-            {!recording ? (
-              <button className="btn" onClick={startRecording} disabled={!canRecord} title={canRecord?"Start recording":"Recording not supported"}>Record</button>
-            ) : (
-              <button className="btn" style={{ background:'#ef4444' }} onClick={stopRecording}>Stop & Save</button>
-            )}
-            <button className="btn" onClick={() => { setCats(0); repStateRef.current = { phase: 'down', lastAbove: 0, lastRepAt: 0 }; }}>Reset</button>
-            <button className="btn" onClick={() => { setBarY(null); setMsg('Tap the bar location to calibrate'); }}>Re‑set bar</button>
-          </div>
-          <div style={{ marginTop:12 }}>
-            <label style={{ fontSize:12, opacity:.7 }}>Sensitivity (px above bar)</label>
-            <div style={{ display:'flex', alignItems:'center', gap:12 }}>
-              <input type="range" min={8} max={60} step={1} value={sensitivity} onChange={(e)=>setSensitivity(parseInt(e.target.value,10))} style={{ width:'100%' }} />
-              <div style={{ width:48, textAlign:'right' }}>{sensitivity} px</div>
-            </div>
-          </div>
-          <p style={{ marginTop:8, fontSize:14, opacity:.8 }}>{msg}</p>
+    <div style={{ position:'fixed', inset:0, background:'#000', color:'#fff', overflow:'hidden' }}>
+      {/* Hidden video source */}
+      <video ref={videoRef} playsInline muted style={{ display:'none' }} />
+
+      {/* Canvases */}
+      <canvas ref={baseRef}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onTouchEnd={onPointerUp}
+        style={{ position:'absolute', inset:0 }}
+      />
+      <canvas ref={uiRef}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onTouchEnd={onPointerUp}
+        style={{ position:'absolute', inset:0 }}
+      />
+      <canvas ref={recRef} style={{ display:'none' }} />
+
+      {/* Top bar */}
+      <div style={{ position:'absolute', top:0, left:0, right:0, padding:'10px env(safe-area-inset-right) 10px env(safe-area-inset-left)', display:'flex', alignItems:'center', justifyContent:'space-between', gap:8 }}>
+        <div style={{ fontSize:14, opacity:.9 }}>Pull‑Up Rescue</div>
+        <div style={{ display:'flex', gap:8 }}>
+          <button onClick={toggleCamera} style={btn()}>Flip</button>
+          {!detecting ? (
+            <button onClick={startDetect} style={btn()}>Start</button>
+          ) : (
+            <button onClick={stopDetect} style={btn()}>Pause</button>
+          )}
         </div>
       </div>
+
+      {/* Bottom control cluster */}
+      <div style={{ position:'absolute', left:0, right:0, bottom:0, padding:'10px env(safe-area-inset-right) 14px env(safe-area-inset-left)', display:'grid', gap:8 }}>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8 }}>
+          {!recording ? (
+            <button onClick={startRecording} disabled={!canRecord} style={btn(canRecord?1:0.4)}>Record</button>
+          ) : (
+            <button onClick={stopRecording} style={btn(1,'#ef4444')}>Stop</button>
+          )}
+          <button onClick={() => { setCats(0); repRef.current = { phase:'down', lastAbove:0, lastRepAt:0 }; }} style={btn()}>Reset</button>
+          <button onClick={() => setBarY(null)} style={btn()}>Re‑set bar</button>
+        </div>
+
+        {/* Sliders */}
+        <div style={{ display:'grid', gap:6 }}>
+          <Labeled label={`Sensitivity: ${sensitivity}px`}>
+            <input type="range" min={8} max={80} step={1} value={sensitivity} onChange={(e)=>setSensitivity(parseInt(e.target.value,10))} style={{ width:'100%' }} />
+          </Labeled>
+          <Labeled label={`Line width: ${lineWidth}px`}>
+            <input type="range" min={2} max={16} step={1} value={lineWidth} onChange={(e)=>setLineWidth(parseInt(e.target.value,10))} style={{ width:'100%' }} />
+          </Labeled>
+          <Labeled label="Line color">
+            <select value={lineColor} onChange={(e)=>setLineColor(e.target.value)} style={select()}>
+              <option value="#00ff88">Green</option>
+              <option value="#ffd60a">Yellow</option>
+              <option value="#ff4d4f">Red</option>
+              <option value="#60a5fa">Blue</option>
+              <option value="#ffffff">White</option>
+            </select>
+          </Labeled>
+        </div>
+
+        <div style={{ fontSize:12, opacity:.8, textAlign:'center' }}>{msg}</div>
+      </div>
+    </div>
+  );
+}
+
+function btn(opacity=1, bg) {
+  return {
+    border:0, borderRadius:14, padding:'10px 12px',
+    background: bg || 'rgba(255,255,255,.12)', color:'#fff',
+    opacity, backdropFilter:'saturate(120%) blur(6px)'
+  };
+}
+function select(){
+  return { width:'100%', borderRadius:10, background:'rgba(255,255,255,.12)', color:'#fff', border:'0', padding:'8px' };
+}
+function Labeled({label, children}){
+  return (
+    <div>
+      <div style={{ fontSize:11, opacity:.75, marginBottom:4 }}>{label}</div>
+      {children}
     </div>
   );
 }
