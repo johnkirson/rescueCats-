@@ -29,7 +29,7 @@ export const INFER_EVERY_MS = 70;               // pose estimation cadence (~14H
  * Потом тонко подправить каждый спрайт можно через CAT_PER_STATE_SCALE и CAT_Y_NUDGE_PX.
  */
 export const CAT_BASE_WIDTH_PX = 64;     // base logical width for cat sprites
-export const CAT_GLOBAL_SCALE = 1.0;     // multiply ALL cat sprites at once
+export const CAT_GLOBAL_SCALE = 1.5;     // multiply ALL cat sprites at once
 
 /** Optional per‑state scale multipliers (relative to global). */
 export const CAT_PER_STATE_SCALE = {
@@ -235,3 +235,4 @@ export default function PullUpRescueV50(){
 
 function btn(opacity=1,bg){ return {border:0,borderRadius:14,padding:'10px 12px',background:bg||'rgba(255,255,255,.12)',color:'#fff',opacity,backdropFilter:'saturate(120%) blur(6px)'}; }
 function Labeled({label,children}){ return (<div><div style={{fontSize:11,opacity:.75,marginBottom:4}}>{label}</div>{children}</div>); }
+
