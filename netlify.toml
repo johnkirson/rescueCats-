@@ -2,8 +2,13 @@
   command = "npm run build"
   publish = "dist"
 
+[build.environment]
+  NODE_VERSION = "20"
+
+
 # Optional: increase response headers if you later add workers/wasm
 # [[headers]]
 #   for = "/*"
 #   [headers.values]
+
 #   X-Content-Type-Options = "nosniff"
