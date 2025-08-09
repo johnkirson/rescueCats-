@@ -33,7 +33,7 @@ export const CAT_Y_NUDGE_PX = { idle:0, attached:0, falling:0, seated:0 };
  *   renderH = (imgH * renderW / imgW) * ROPE_SCALE_Y
  * Позиция по X центрируется. Поднять/опустить верёвку — перетаскиванием как раньше.
  */
-export const ROPE_SCALE_X = 1.00; // 1.0 = во всю ширину экрана; 0.9 = чуть короче
+export const ROPE_SCALE_X = 1.50; // 1.0 = во всю ширину экрана; 0.9 = чуть короче
 export const ROPE_SCALE_Y = 1.00; // 1.0 = исходная высота, >1 — выше огонь, <1 — ниже
 
 // ——— Drop behavior (NEW) ———
@@ -41,7 +41,7 @@ export const ROPE_SCALE_Y = 1.00; // 1.0 = исходная высота, >1 —
  * Насколько НИЖЕ порога нужно «пронести» кота до отцепления (device px)
  * и минимум времени, которое он должен быть ниже порога.
  */
-export const DROP_TRAVEL_BELOW_PX = 10;  // расстояние проноса
+export const DROP_TRAVEL_BELOW_PX = 100;  // расстояние проноса
 export const DROP_MIN_TIME_MS = 200;     // минимум времени ниже порога
 // =======================================================
 
@@ -246,3 +246,4 @@ export default function PullUpRescueV53(){
 
 function btn(opacity=1,bg){ return {border:0,borderRadius:14,padding:'10px 12px',background:bg||'rgba(255,255,255,.12)',color:'#fff',opacity,backdropFilter:'saturate(120%) blur(6px)'}; }
 function Labeled({label,children}){ return (<div><div style={{fontSize:11,opacity:.75,marginBottom:4}}>{label}</div>{children}</div>); }
+
