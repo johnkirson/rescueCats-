@@ -5,10 +5,12 @@ import "@tensorflow/tfjs-backend-webgl";
 import "@tensorflow/tfjs-converter";
 
 /**
- * v5.6 —
- *  1) Attached-follow works BOTH above and below threshold (until delayed drop triggers).
- *  2) New landing sprite (assets/7.png) shown briefly before seated.
- *  3) Keeps v5.5 delayed drop (time + depth), v5.4 counter fix, v5.3 HUD & rope scale.
+ * v5.7 — Fix: idle flicker for a single frame after landing
+ * Root cause: when mode switched to 'seated', drawActiveCat mapped it to 'idle'.
+ * Solution: if mode==='seated' — don't draw active sprite at all (it's already
+ * appended to seatedCats and will be drawn by drawSeatedCats this frame).
+ *
+ * Keeps v5.6 behavior: attached follow above+below, landing sprite 7, delayed drop, HUD.
  */
 
 // ===================== CALIBRATION =====================
@@ -29,17 +31,11 @@ export const ROPE_SCALE_X = 1.20; // width relative to screen width
 export const ROPE_SCALE_Y = 1.00; // vertical stretch of entire fire.png
 
 // ——— Delayed drop ———
-/**
- * Отпускать только если одновременно выполнены 2 условия:
- *  1) непрерывно ниже порога ≥ DROP_MIN_TIME_MS;
- *  2) максимальная глубина ниже порога ≥ DROP_TRAVEL_BELOW_PX.
- * Пока эти условия не выполнены — кот остаётся в режиме 'attached' и **следует за носом по Y**.
- */
 export const DROP_TRAVEL_BELOW_PX = 22; // px
 export const DROP_MIN_TIME_MS = 500;    // ms
 
-// ——— Landing (NEW) ———
-export const CAT_LAND_DURATION_MS = 220; // сколько показывать спрайт посадки перед "seated"
+// ——— Landing ———
+export const CAT_LAND_DURATION_MS = 220; // show sprite 7 before seated
 // =======================================================
 
 const SPRITES = {
@@ -48,13 +44,13 @@ const SPRITES = {
   cat_attached: "/assets/2.png",
   cat_jump: "/assets/3.png",
   cat_seated: "/assets/4.png",
-  cat_land: "/assets/7.png", // <— НОВОЕ: спрайт приземления
+  cat_land: "/assets/7.png",
 };
 
 const MOVENET_EDGES = { 0:[0,1],1:[1,3],2:[0,2],3:[2,4],4:[5,7],5:[7,9],6:[6,8],7:[8,10],8:[5,6],9:[5,11],10:[6,12],11:[11,12],12:[11,13],13:[13,15],14:[12,14],15:[14,16] };
 function updateRepState(prev, isAbove, now, minAboveMs = 160, minIntervalMs = 420){ const next={...prev}; let counted=0; if(prev.phase==='down'&&isAbove){next.phase='up'; next.lastAbove=now;} else if(prev.phase==='up'&&!isAbove){ if(now-prev.lastAbove>minAboveMs && now-prev.lastRepAt>minIntervalMs){ next.phase='down'; next.lastRepAt=now; counted=1;} else { next.phase='down'; } } return {next, counted}; }
 
-export default function PullUpRescueV56(){
+export default function PullUpRescueV57(){
   const videoRef = useRef(null); const baseRef=useRef(null); const uiRef=useRef(null); const recRef=useRef(null);
   const detectorRef=useRef(null); const rafRef=useRef(null); const streamRef=useRef(null);
   const inferCanvasRef=useRef(document.createElement('canvas'));
@@ -70,7 +66,6 @@ export default function PullUpRescueV56(){
   const [sensitivity,setSensitivity]=useState(DEFAULT_SENSITIVITY); const sensitivityRef=useRef(DEFAULT_SENSITIVITY);
   const [showPose,setShowPose]=useState(true);
 
-  // Saved counter: state + ref
   const [saved,setSaved]=useState(0); const savedRef = useRef(0); useEffect(()=>{ savedRef.current = saved; }, [saved]);
 
   const repRef=useRef({phase:'down',lastAbove:0,lastRepAt:0});
@@ -111,52 +106,32 @@ export default function PullUpRescueV56(){
       if(streamRef.current) streamRef.current.getTracks().forEach(t=>t.stop()); const v=videoRef.current; v.srcObject=stream; await v.play(); streamRef.current=stream; setMirrorFromStream(stream); updateGeom(); const label = stream.getVideoTracks?.()[0]?.label || ''; const finalBucket = /front|user|face/i.test(label) ? 'front' : (/ultra\s*wide|0\.5x|ultra/i.test(label) ? 'ultra' : 'wide'); setBucketChoice(finalBucket); return finalBucket; }catch(e){ setDebug(`Switch failed: ${e.name}`); return bucket; } }
 
   const tick = async ()=>{ const video=videoRef.current, base=baseRef.current, ui=uiRef.current; if(!video||!base||!ui) return; const b=base.getContext('2d'); const u=ui.getContext('2d'); const {W,H,vw,vh,scale,dx,dy,mirrored}=geomRef.current; const inC=inferCanvasRef.current; if(!W) updateGeom();
-    // BASE: camera
     b.clearRect(0,0,W,H); const dw=vw*scale, dh=vh*scale; if(mirrored){ b.save(); b.translate(W,0); b.scale(-1,1); b.drawImage(video, -dx - dw + W, dy, dw, dh); b.restore(); } else { b.drawImage(video, dx, dy, dw, dh); }
-
-    // UI: clear
     u.clearRect(0,0,W,H);
 
-    // Pose inference while recording
-    const now=performance.now(); if(recordingRef.current && detectorRef.current){ if(now - lastInferRef.current >= INFER_EVERY_MS){ lastInferRefRef:; lastInferRef.current=now; const ic=inC.getContext('2d'); const s=Math.max(inC.width/vw, inC.height/vh); const iw=vw*s, ih=vh*s; const ix=(inC.width-iw)/2, iy=(inC.height-ih)/2; inferMapRef.current={s,ix,iy}; ic.clearRect(0,0,inC.width,inC.height); ic.drawImage(video, ix, iy, iw, ih); try{ const poses=await detectorRef.current.estimatePoses(inC,{maxPoses:1,flipHorizontal:false}); lastPoseRef.current = poses && poses[0] ? poses[0] : null; }catch(e){} }
+    const now=performance.now(); if(recordingRef.current && detectorRef.current){ if(now - lastInferRef.current >= INFER_EVERY_MS){ lastInferRef.current=now; const ic=inC.getContext('2d'); const s=Math.max(inC.width/vw, inC.height/vh); const iw=vw*s, ih=vh*s; const ix=(inC.width-iw)/2, iy=(inC.height-ih)/2; inferMapRef.current={s,ix,iy}; ic.clearRect(0,0,inC.width,inC.height); ic.drawImage(video, ix, iy, iw, ih); try{ const poses=await detectorRef.current.estimatePoses(inC,{maxPoses:1,flipHorizontal:false}); lastPoseRef.current = poses && poses[0] ? poses[0] : null; }catch(e){} }
       const pose = lastPoseRef.current; if(pose){ const kps=pose.keypoints; const {s,ix,iy}=inferMapRef.current; const mapped=kps.map((kp)=>{ const xv=(kp.x-ix)/s; const yv=(kp.y-iy)/s; const xd = dx + (mirrored ? (vw - xv) : xv) * scale; const yd = dy + yv * scale; return {X:xd,Y:yd,score:kp.score, raw:{xv,yv}}; });
         if(showPose){ u.save(); u.strokeStyle='rgba(255,255,255,.9)'; u.lineWidth=2; drawPoseMapped(u,mapped); u.restore(); }
         const nose = mapped[0]; const by=barYRef.current; const sens=sensitivityRef.current; if(nose?.score>0.4 && by!==null){ const thr=by - sens; const above = nose.Y <= thr; const {next}=updateRepState(repRef.current,above,now); repRef.current=next;
-
-          // FOLLOW while attached (both above and below) until delayed drop triggers
-          if(catRef.current.mode==='idle' && above){
-            catRef.current.mode='attached';
-            catRef.current.attachDy = (by - CAT_BASELINE_ABOVE_ROPE_PX*(window.devicePixelRatio||1)) - nose.Y;
-          }
-
-          if(catRef.current.mode==='attached'){
-            // Smooth follow to nose with preserved attach offset
-            const targetY = nose.Y + catRef.current.attachDy;
-            catRef.current.y += (targetY - catRef.current.y) * 0.45;
-            catRef.current.x  = nose.X;
-
-            if(above){
-              // reset drop window while above
-              catRef.current.belowStart = 0; catRef.current.maxDepthBelow = 0;
-            } else {
-              // below: accumulate time & depth; release only when both satisfied
-              if(!catRef.current.belowStart){ catRef.current.belowStart = now; catRef.current.maxDepthBelow = 0; }
-              const depth = Math.max(0, nose.Y - thr); // positive px below threshold
-              if(depth > catRef.current.maxDepthBelow) catRef.current.maxDepthBelow = depth;
-              const timeEnough = (now - catRef.current.belowStart) >= DROP_MIN_TIME_MS;
-              const travelEnough = catRef.current.maxDepthBelow >= DROP_TRAVEL_BELOW_PX;
-              if(timeEnough && travelEnough){ startCatFall(); }
-            }
+        if(catRef.current.mode==='idle' && above){ catRef.current.mode='attached'; catRef.current.attachDy = (by - CAT_BASELINE_ABOVE_ROPE_PX*(window.devicePixelRatio||1)) - nose.Y; }
+        if(catRef.current.mode==='attached'){
+          const targetY = nose.Y + catRef.current.attachDy; catRef.current.y += (targetY - catRef.current.y) * 0.45; catRef.current.x  = nose.X;
+          if(above){ catRef.current.belowStart = 0; catRef.current.maxDepthBelow = 0; }
+          else { if(!catRef.current.belowStart){ catRef.current.belowStart = now; catRef.current.maxDepthBelow = 0; }
+            const depth = Math.max(0, nose.Y - thr);
+            if(depth > catRef.current.maxDepthBelow) catRef.current.maxDepthBelow = depth;
+            const timeEnough = (now - catRef.current.belowStart) >= DROP_MIN_TIME_MS;
+            const travelEnough = catRef.current.maxDepthBelow >= DROP_TRAVEL_BELOW_PX;
+            if(timeEnough && travelEnough){ startCatFall(); }
           }
         }
       }
     }
 
-    // overlays
     drawRopeSprite(u,W,H,barYRef.current,imgs.rope);
     drawThreshold(u,W,H,barYRef.current,sensitivityRef.current);
     drawSeatedCats(u,imgs);
-    drawActiveCat(u,imgs);
+    drawActiveCat(u,imgs); // safe: seated handled inside
     drawSavedCounter(u,W,H,savedRef.current);
 
     rafRef.current=requestAnimationFrame(tick);
@@ -164,31 +139,25 @@ export default function PullUpRescueV56(){
 
   function drawPoseMapped(ctx,kps){ const edges = MOVENET_EDGES; for(const [i,j] of Object.values(edges)){ const a=kps[i],b=kps[j]; if(a?.score>0.3&&b?.score>0.3){ ctx.beginPath(); ctx.moveTo(a.X,a.Y); ctx.lineTo(b.X,b.Y); ctx.stroke(); } } for(const k of kps){ if(k.score>0.3){ ctx.beginPath(); ctx.arc(k.X,k.Y,3,0,Math.PI*2); ctx.fillStyle='rgba(255,255,255,.95)'; ctx.fill(); } } }
 
-  // Rope sprite with independent X/Y scale
   function drawRopeSprite(ctx,W,H,y,img){ if(!img||y==null) return; const fullW = W*ROPE_SCALE_X; const scaleW = fullW / img.width; const renderW = fullW; const renderH0 = img.height * scaleW; const renderH = renderH0 * ROPE_SCALE_Y; const baseline = renderH * (1 - ROPE_BASELINE_FROM_BOTTOM); const yTop = Math.round(y - baseline); const xLeft = Math.round((W - renderW)/2); ctx.drawImage(img, xLeft, yTop, renderW, renderH); }
 
-  // ---- CAT SIZING HELPERS ----
   function catWidthPx(state){ const dpr=window.devicePixelRatio||1; const local=(CAT_PER_STATE_SCALE[state] ?? 1)*CAT_GLOBAL_SCALE; return CAT_BASE_WIDTH_PX * local * dpr; }
   function catHeightFor(img, w){ return w * (img.height/img.width); }
 
-  // Cats
   function spawnCatCentered(){ const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const W=u.width; const y=barYRef.current ?? Math.floor(u.height*0.5); catRef.current={ mode:'idle', x:Math.floor(W/2), y:y - CAT_BASELINE_ABOVE_ROPE_PX*p, vx:0, vy:0, lastT:performance.now(), attachDy:0, belowStart:0, maxDepthBelow:0, landUntil:0 }; }
   function startCatFall(){ const now=performance.now(); const c=catRef.current; c.mode='falling'; c.vx=(Math.random()*2-1)*24; c.vy=0; c.lastT=now; c.belowStart=0; c.maxDepthBelow=0; }
-  function stepActiveCat(){ const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const H=u.height; const groundY=H-28*p; const c=catRef.current; const now=performance.now(); const dt=Math.min(0.05,(now-c.lastT)/1000); c.lastT=now; if(c.mode==='falling'){ const g=1200*p; c.vy += g*dt; c.y += c.vy*dt; c.x += c.vx*dt; if(c.y >= groundY){ c.y=groundY; c.mode='landing'; c.landUntil = now + CAT_LAND_DURATION_MS; } }
-    else if(c.mode==='landing'){ if(now >= c.landUntil){ // commit to seated and score
-        c.mode='seated'; const seat = placeSeatedCat(u); seatedCatsRef.current.push(seat); savedRef.current = savedRef.current + 1; setSaved(v=>v+1); setTimeout(()=>{ spawnCatCentered(); }, 250); } }
-  }
+  function stepActiveCat(){ const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const H=u.height; const groundY=H-28*p; const c=catRef.current; const now=performance.now(); const dt=Math.min(0.05,(now-c.lastT)/1000); c.lastT=now; if(c.mode==='falling'){ const g=1200*p; c.vy += g*dt; c.y += c.vy*dt; c.x += c.vx*dt; if(c.y >= groundY){ c.y=groundY; c.mode='landing'; c.landUntil = now + CAT_LAND_DURATION_MS; } } else if(c.mode==='landing'){ if(now >= c.landUntil){ c.mode='seated'; const seat = placeSeatedCat(u); seatedCatsRef.current.push(seat); savedRef.current = savedRef.current + 1; setSaved(v=>v+1); setTimeout(()=>{ spawnCatCentered(); }, 250); } } }
   function placeSeatedCat(u){ const p=window.devicePixelRatio||1; const W=u.width; const H=u.height; const margin=20*p; const spacing=56*p; const baseY=H-28*p; const count=seatedCatsRef.current.length; const maxPerRow=Math.floor((W-2*margin)/spacing); const row=Math.floor(count/maxPerRow); const col=count%maxPerRow; const x=margin + col*spacing; const y=baseY - row*spacing*0.75; return {x,y}; }
   function drawSeatedCats(ctx,imgs){ const im = imgs.cat_seated; if(!im) return; const w = catWidthPx('seated'); const h = catHeightFor(im,w); for(const s of seatedCatsRef.current){ const yNudge=(CAT_Y_NUDGE_PX.seated||0)*(window.devicePixelRatio||1); ctx.drawImage(im, Math.round(s.x - w/2), Math.round(s.y - h + yNudge), w, h); } }
-  function drawActiveCat(ctx,imgs){ const c=catRef.current; stepActiveCat(); if(!c) return; let state = (c.mode==='attached')?'attached':(c.mode==='falling'?'falling':(c.mode==='landing'?'landing':'idle')); const im = state==='attached' ? imgs.cat_attached : state==='falling' ? imgs.cat_jump : state==='landing' ? imgs.cat_land : imgs.cat_idle; if(!im) return; const w = catWidthPx(state); const h = catHeightFor(im,w); const yNudge=(CAT_Y_NUDGE_PX[state]||0)*(window.devicePixelRatio||1); ctx.drawImage(im, Math.round(c.x - w/2), Math.round(c.y - h + yNudge), w, h); }
+  function drawActiveCat(ctx,imgs){ const c=catRef.current; stepActiveCat(); if(!c) return; if(c.mode==='seated'){ return; } // <-- FIX: seated no longer renders idle frame
+    const state = c.mode==='attached' ? 'attached' : c.mode==='falling' ? 'falling' : c.mode==='landing' ? 'landing' : 'idle';
+    const im = state==='attached' ? imgs.cat_attached : state==='falling' ? imgs.cat_jump : state==='landing' ? imgs.cat_land : imgs.cat_idle; if(!im) return; const w = catWidthPx(state); const h = catHeightFor(im,w); const yNudge=(CAT_Y_NUDGE_PX[state]||0)*(window.devicePixelRatio||1); ctx.drawImage(im, Math.round(c.x - w/2), Math.round(c.y - h + yNudge), w, h); }
 
-  // Centered counter HUD
   function drawSavedCounter(ctx,W,H,val){ const p=window.devicePixelRatio||1; const pad=10*p; const boxW=180*p, boxH=56*p; const x=(W-boxW)/2, y=pad; ctx.save(); ctx.fillStyle='rgba(0,0,0,.35)'; ctx.beginPath(); const r=12*p; roundRect(ctx,x,y,boxW,boxH,r); ctx.fill(); ctx.font=`${14*p}px system-ui`; ctx.fillStyle='#fff'; ctx.fillText('Saved', x+14*p, y+20*p); ctx.font=`${28*p}px system-ui`; ctx.fillText(`${val}`, x+14*p, y+44*p); ctx.restore(); }
   function roundRect(ctx,x,y,w,h,r){ ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); }
 
   function drawThreshold(ctx,W,H,barY,sensitivity){ if(barY==null) return; const p=window.devicePixelRatio||1; const thr=barY - sensitivity; ctx.save(); ctx.setLineDash([16*p, 10*p]); ctx.lineWidth=4*p; ctx.strokeStyle='#00ff88'; ctx.beginPath(); ctx.moveTo(0,thr); ctx.lineTo(W,thr); ctx.stroke(); ctx.setLineDash([]); ctx.beginPath(); ctx.arc(W-40*p,thr,10*p,0,Math.PI*2); ctx.fillStyle='#00ff88'; ctx.fill(); ctx.restore(); }
 
-  // Interactions
   const draggingRef=useRef(false);
   function onPointerDown(e){ const y=getY(e); if(y==null) return; setBarY(y); if(catRef.current.mode==='idle') alignCatToBar(); draggingRef.current=true; }
   function onPointerMove(e){ if(!draggingRef.current) return; const y=getY(e); if(y==null) return; setBarY(y); if(catRef.current.mode==='idle') alignCatToBar(); }
@@ -199,7 +168,6 @@ export default function PullUpRescueV56(){
   function onTouchEnd(e){ e.preventDefault(); onPointerUp(); }
   function getY(e){ const rect=uiRef.current.getBoundingClientRect(); const dpr=uiRef.current.width/rect.width; if(e.touches&&e.touches[0]) return (e.touches[0].clientY-rect.top)*dpr; if(typeof e.clientY==='number') return (e.clientY-rect.top)*dpr; return null; }
 
-  // Recording
   const mediaRecorderRef=useRef(null); const recordedChunksRef=useRef([]);
   function isiOSSafari(){ return /iP(hone|ad|od)/.test(navigator.userAgent) && /Safari\//.test(navigator.userAgent) && !/CriOS|FxiOS/.test(navigator.userAgent); }
   function pickMime(){ const prefer = isiOSSafari() ? ['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4'] : []; const fall=['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']; const opts=[...prefer,...fall]; for(const o of opts){ try{ if(window.MediaRecorder && MediaRecorder.isTypeSupported(o)) return o; }catch{} } return ''; }
