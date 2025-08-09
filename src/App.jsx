@@ -5,27 +5,26 @@ import "@tensorflow/tfjs-backend-webgl";
 import "@tensorflow/tfjs-converter";
 
 /**
- * v3.9 — Focused for iPhone
- * ✔ Camera picker reduced to 3 logical choices: Back Ultra‑Wide (0.5x), Back Wide (1x), Front
- *   (we map real devices to these buckets; hide Flip button)
- * ✔ Recording prefers MP4 on iPhone; falls back only if absolutely needed
- * ✔ Keeps aligned pose overlay + working rep counter
- * ✔ Removed Center/Reset buttons (перемещаем пальцем)
+ * v3.10 — Fixes for MVP polish
+ * ✔ Оставляем только ОДИН счётчик — рисуем на UI‑канвасе → попадает в запись
+ * ✔ Счётчик в видео теперь обновляется (используем repsRef в tick, без устаревшего стейта)
+ * ✔ Запись пожирнее: 30–60 fps, 8 Mbps, prefer MP4 на iOS; синхронизированные размеры
+ * ✔ Камера: при выборе девайса просим 1920×1080@30 (идеально), остаётся даунгрейд, если нельзя
  */
 
 const MOVENET_EDGES = { 0:[0,1],1:[1,3],2:[0,2],3:[2,4],4:[5,7],5:[7,9],6:[6,8],7:[8,10],8:[5,6],9:[5,11],10:[6,12],11:[11,12],12:[11,13],13:[13,15],14:[12,14],15:[14,16] };
 function updateRepState(prev, isAbove, now, minAboveMs = 200, minIntervalMs = 500){ const next={...prev}; let counted=0; if(prev.phase==='down'&&isAbove){next.phase='up'; next.lastAbove=now;} else if(prev.phase==='up'&&!isAbove){ if(now-prev.lastAbove>minAboveMs && now-prev.lastRepAt>minIntervalMs){ next.phase='down'; next.lastRepAt=now; counted=1;} else { next.phase='down'; } } return {next, counted}; }
 
-export default function PullUpRescueV39(){
+export default function PullUpRescueV310(){
   const videoRef = useRef(null); const baseRef=useRef(null); const uiRef=useRef(null); const recRef=useRef(null);
   const detectorRef=useRef(null); const rafRef=useRef(null); const streamRef=useRef(null);
 
   // UI state
   const [camReady,setCamReady]=useState(false);
-  const [bucketMap,setBucketMap]=useState({}); // { ultra:string, wide:string, front:string }
+  const [bucketMap,setBucketMap]=useState({}); // { ultra, wide, front }
   const [bucketChoice,setBucketChoice]=useState('ultra');
   const [msg,setMsg]=useState("Drag the bar to the pull‑up bar height, then Start"); const [debug,setDebug]=useState("");
-  const [reps,setReps]=useState(0);
+  const [reps,setReps]=useState(0); const repsRef=useRef(0);
   const [detecting,setDetecting]=useState(false); const detectingRef=useRef(false);
   const [recording,setRecording]=useState(false); const recordingRef=useRef(false);
   const [canRecord,setCanRecord]=useState(false);
@@ -35,10 +34,11 @@ export default function PullUpRescueV39(){
   const draggingRef=useRef(false);
   const repRef=useRef({phase:'down',lastAbove:0,lastRepAt:0});
 
-  // geometry for mapping video→canvas
+  // geometry
   const geomRef = useRef({ W:0,H:0,vw:0,vh:0,scale:1,dx:0,dy:0, mirrored:false });
 
-  // keep refs in sync
+  // sync refs
+  useEffect(()=>{ repsRef.current=reps; },[reps]);
   useEffect(()=>{ detectingRef.current=detecting; },[detecting]);
   useEffect(()=>{ recordingRef.current=recording; },[recording]);
   useEffect(()=>{ barYRef.current=barY; },[barY]);
@@ -47,41 +47,26 @@ export default function PullUpRescueV39(){
   useEffect(()=>{ const c=document.createElement('canvas'); setCanRecord(typeof c.captureStream==='function' && 'MediaRecorder' in window); },[]);
   useEffect(()=>{ const resize=()=>{ const dpr=Math.max(1,Math.min(3,window.devicePixelRatio||1)); const W=window.innerWidth,H=window.innerHeight; [baseRef.current,uiRef.current,recRef.current].forEach(cv=>{ if(!cv) return; cv.style.width=W+'px'; cv.style.height=H+'px'; cv.width=Math.floor(W*dpr); cv.height=Math.floor(H*dpr);}); if (uiRef.current && barYRef.current==null) { const mid=Math.floor(uiRef.current.height*0.5); setBarY(mid); barYRef.current=mid; } updateGeom(); }; resize(); window.addEventListener('resize',resize); return()=>window.removeEventListener('resize',resize); },[]);
 
-  function updateGeom(){ const video=videoRef.current, base=baseRef.current; if(!video||!base) return; const W=base.width,H=base.height; const vw=video.videoWidth||1280, vh=video.videoHeight||720; const scale=Math.max(W/vw,H/vh); const dw=vw*scale, dh=vh*scale; const dx=(W-dw)/2, dy=(H-dh)/2; geomRef.current={W,H,vw,vh,scale,dx,dy, mirrored: isFrontSelected()}; }
-  const isFrontSelected = () => bucketChoice==='front';
+  function updateGeom(){ const video=videoRef.current, base=baseRef.current; if(!video||!base) return; const W=base.width,H=base.height; const vw=video.videoWidth||1280, vh=video.videoHeight||720; const scale=Math.max(W/vw,H/vh); const dw=vw*scale, dh=vh*scale; const dx=(W-dw)/2, dy=(H-dh)/2; const mirrored = bucketChoice==='front'; geomRef.current={W,H,vw,vh,scale,dx,dy,mirrored}; }
 
   async function createMoveNetDetector(){ await tf.setBackend('webgl'); await tf.ready(); const opts=[ {modelType:poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING}, {modelType:poseDetection.movenet.modelType.SINGLEPOSE_THUNDER}, {modelType:poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING} ]; let lastErr; for(const o of opts){ try{ return await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet,o);}catch(e){ lastErr=e; } } throw lastErr; }
   async function ensureDetector(){ if(!detectorRef.current){ detectorRef.current = await createMoveNetDetector(); } }
 
-  // map real devices to 3 buckets
-  function toBuckets(devices){ const vids=devices.filter(d=>d.kind==='videoinput'); const find=(rx)=>vids.find(d=>rx.test((d.label||'').toLowerCase())); const ultra = find(/ultra\s*wide|0\.5x|ultra/); const wide = find(/wide|back|rear|environment/) && !find(/tele|2x|3x/); const front = find(/front|user|face/); // fallbacks
-    return {
-      ultra: (ultra||null)?.deviceId || null,
-      wide: (wide||vids.find(d=>!/front|user|face/i.test(d.label)))?.deviceId || null,
-      front: (front||vids.find(d=>/front|user|face/i.test(d.label)))?.deviceId || null,
-    };
-  }
+  function toBuckets(devices){ const vids=devices.filter(d=>d.kind==='videoinput'); const LB=(d)=>(d.label||'').toLowerCase(); const find=(rx)=>vids.find(d=>rx.test(LB(d))); const ultra = find(/ultra\s*wide|0\.5x|ultra/); const front = find(/front|user|face/); // wide = любой бек, исключая front
+    const wide = vids.find(d=>!/front|user|face/i.test(d.label||'')); return { ultra: ultra?.deviceId||null, wide: wide?.deviceId||null, front: front?.deviceId||null }; }
 
-  async function enableCamera(){ setDebug(""); try{ await ensureDetector(); // unlock labels
-      const pre=await navigator.mediaDevices.getUserMedia({video:true,audio:false}); const v=videoRef.current; v.setAttribute('playsinline',''); v.srcObject=pre; await v.play(); updateGeom(); const devices=await navigator.mediaDevices.enumerateDevices(); const buckets=toBuckets(devices); setBucketMap(buckets);
-      // choose default bucket preference: ultra -> wide -> front
-      const choice = buckets.ultra ? 'ultra' : (buckets.wide ? 'wide' : 'front'); setBucketChoice(choice);
-      await switchToBucket(choice, pre);
-      setCamReady(true); cancelAnimationFrame(rafRef.current||0); rafRef.current=requestAnimationFrame(tick); if (uiRef.current && barYRef.current==null) { const mid=Math.floor(uiRef.current.height*0.5); setBarY(mid); barYRef.current=mid; } }catch(e){ console.error(e); setMsg('Camera init failed. Check permissions in Settings > Safari > Camera.'); setDebug(`${e.name||'Error'}: ${e.message||e}`); } }
+  async function enableCamera(){ setDebug(""); try{ await ensureDetector(); const pre=await navigator.mediaDevices.getUserMedia({video:true,audio:false}); const v=videoRef.current; v.setAttribute('playsinline',''); v.srcObject=pre; await v.play(); updateGeom(); const devices=await navigator.mediaDevices.enumerateDevices(); const buckets=toBuckets(devices); setBucketMap(buckets); const choice = buckets.ultra ? 'ultra' : (buckets.wide ? 'wide' : 'front'); setBucketChoice(choice); await switchToBucket(choice, pre); setCamReady(true); cancelAnimationFrame(rafRef.current||0); rafRef.current=requestAnimationFrame(tick); if (uiRef.current && barYRef.current==null) { const mid=Math.floor(uiRef.current.height*0.5); setBarY(mid); barYRef.current=mid; } }catch(e){ console.error(e); setMsg('Camera init failed. Check permissions in Settings > Safari > Camera.'); setDebug(`${e.name||'Error'}: ${e.message||e}`); } }
 
-  async function switchToBucket(bucket, preStream=null){ try{ let deviceId=bucketMap[bucket]; let stream=preStream; if(deviceId){ try{ stream=await navigator.mediaDevices.getUserMedia({ video:{ deviceId:{ exact: deviceId }}, audio:false }); }catch(e){ setDebug(`Exact deviceId (${bucket}) failed: ${e.name}`); } } if(!stream){ // fallback to any
-        stream=await navigator.mediaDevices.getUserMedia({ video:true, audio:false }); }
+  async function switchToBucket(bucket, preStream=null){ try{ let deviceId=bucketMap[bucket]; let stream=preStream; const baseConstraints = { width:{ideal:1920}, height:{ideal:1080}, frameRate:{ideal:30, max:60} };
+      if(deviceId){ try{ stream=await navigator.mediaDevices.getUserMedia({ video:{ deviceId:{ exact: deviceId }, ...baseConstraints }, audio:false }); }catch(e){ setDebug(`Exact deviceId (${bucket}) failed: ${e.name}`); try{ stream=await navigator.mediaDevices.getUserMedia({ video: baseConstraints, audio:false }); }catch{ stream=await navigator.mediaDevices.getUserMedia({ video:true, audio:false }); } } }
+      if(!stream){ stream=await navigator.mediaDevices.getUserMedia({ video: baseConstraints, audio:false }); }
       if(streamRef.current) streamRef.current.getTracks().forEach(t=>t.stop()); const v=videoRef.current; v.srcObject=stream; await v.play(); setBucketChoice(bucket); updateGeom(); }
-    catch(e){ setDebug(`Switch bucket failed: ${e.name}`); }
-  }
+    catch(e){ setDebug(`Switch bucket failed: ${e.name}`); } }
 
-  const tick = async ()=>{ const video=videoRef.current, base=baseRef.current, ui=uiRef.current; if(!video||!base||!ui) return; const b=base.getContext('2d'); const u=ui.getContext('2d'); const {W,H,vw,vh,scale,dx,dy,mirrored}=geomRef.current; if(!W) updateGeom();
-    b.clearRect(0,0,W,H); const dw=vw*scale, dh=vh*scale; if(mirrored){ b.save(); b.translate(W,0); b.scale(-1,1); b.drawImage(video, -dx - dw + W, dy, dw, dh); b.restore(); } else { b.drawImage(video, dx, dy, dw, dh); }
-
+  const tick = async ()=>{ const video=videoRef.current, base=baseRef.current, ui=uiRef.current; if(!video||!base||!ui) return; const b=base.getContext('2d'); const u=ui.getContext('2d'); const {W,H,vw,vh,scale,dx,dy,mirrored}=geomRef.current; if(!W) updateGeom(); b.clearRect(0,0,W,H); const dw=vw*scale, dh=vh*scale; if(mirrored){ b.save(); b.translate(W,0); b.scale(-1,1); b.drawImage(video, -dx - dw + W, dy, dw, dh); b.restore(); } else { b.drawImage(video, dx, dy, dw, dh); }
     if(detectingRef.current && detectorRef.current){ const poses=await detectorRef.current.estimatePoses(video,{maxPoses:1,flipHorizontal: mirrored}); if(poses[0]){ const kps=poses[0].keypoints.map(k=>({...k})); if(showPose){ b.save(); b.globalAlpha=0.7; const mapped=kps.map((kp)=>({ ...kp, X: mirrored ? (dx + dw - kp.x*scale) : (dx + kp.x*scale), Y: dy + kp.y*scale })); drawPoseMapped(b,mapped); b.restore(); }
-        const nose=kps[0]; const by=barYRef.current; const sens=sensitivityRef.current; if(nose?.score>0.4 && by!==null){ const thr=by - sens; const ny = dy + nose.y*scale; const now=performance.now(); const above = ny <= thr; const {next,counted}=updateRepState(repRef.current,above,now); repRef.current=next; if(counted){ setReps(x=>x+1); } } } }
-
-    u.clearRect(0,0,W,H); drawBars(u,W,H,barYRef.current,sensitivityRef.current); drawCounter(u,W,H,reps); rafRef.current=requestAnimationFrame(tick); };
+        const nose=kps[0]; const by=barYRef.current; const sens=sensitivityRef.current; if(nose?.score>0.4 && by!==null){ const thr=by - sens; const ny = dy + nose.y*scale; const now=performance.now(); const above = ny <= thr; const {next,counted}=updateRepState(repRef.current,above,now); repRef.current=next; if(counted){ setReps(x=>{ const nx=x+1; repsRef.current=nx; return nx; }); } } } }
+    u.clearRect(0,0,W,H); drawBars(u,W,H,barYRef.current,sensitivityRef.current); drawCounter(u,W,H,repsRef.current); rafRef.current=requestAnimationFrame(tick); };
 
   function drawPoseMapped(ctx,kps){ ctx.strokeStyle='rgba(255,255,255,.85)'; ctx.lineWidth=2; Object.values(MOVENET_EDGES).forEach(([i,j])=>{ const a=kps[i],b=kps[j]; if(a?.score>0.3&&b?.score>0.3){ ctx.beginPath(); ctx.moveTo(a.X,a.Y); ctx.lineTo(b.X,b.Y); ctx.stroke(); } }); kps.forEach(k=>{ if(k.score>0.3){ ctx.beginPath(); ctx.arc(k.X,k.Y,4,0,Math.PI*2); ctx.fillStyle='rgba(255,255,255,.95)'; ctx.fill(); } }); }
   function drawCounter(ctx,W,H,reps){ const p=window.devicePixelRatio||1; const pad=14*p; const boxW=120*p, boxH=56*p; const x=W - boxW - pad, y=pad; ctx.fillStyle='rgba(0,0,0,.35)'; ctx.fillRect(x,y,boxW,boxH); ctx.font=`${14*p}px system-ui`; ctx.fillStyle='#fff'; ctx.fillText('Reps', x+12*p, y+20*p); ctx.font=`${26*p}px system-ui`; ctx.fillText(`${reps}`, x+12*p, y+44*p); }
@@ -96,11 +81,11 @@ export default function PullUpRescueV39(){
   function onTouchEnd(e){ e.preventDefault(); onPointerUp(); }
   function getY(e){ const rect=uiRef.current.getBoundingClientRect(); const dpr=uiRef.current.width/rect.width; if(e.touches&&e.touches[0]) return (e.touches[0].clientY-rect.top)*dpr; if(typeof e.clientY==='number') return (e.clientY-rect.top)*dpr; return null; }
 
-  // Recording — prefer MP4 on iPhone; higher bitrate
+  // Recording — prefer MP4 on iOS; higher bitrate/fps
   const mediaRecorderRef=useRef(null); const recordedChunksRef=useRef([]);
   function isiOSSafari(){ return /iP(hone|ad|od)/.test(navigator.userAgent) && /Safari\//.test(navigator.userAgent) && !/CriOS|FxiOS/.test(navigator.userAgent); }
   function pickMime(){ const prefer = isiOSSafari() ? ['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4'] : []; const fall=['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']; const opts=[...prefer,...fall]; for(const o of opts){ try{ if(window.MediaRecorder && MediaRecorder.isTypeSupported(o)) return o; }catch{} } return ''; }
-  function startRecording(){ const rec=recRef.current, base=baseRef.current, ui=uiRef.current; if(!rec||!base||!ui||!canRecord) return; const r=rec.getContext('2d'); rec.width=base.width; rec.height=base.height; const mime=pickMime(); if(!mime){ setMsg('Recording not supported on this device/browser'); return; } recordedChunksRef.current=[]; setRecording(true); recordingRef.current=true; const compose=()=>{ if(!recordingRef.current) return; r.clearRect(0,0,rec.width,rec.height); r.drawImage(base,0,0); r.drawImage(ui,0,0); requestAnimationFrame(compose); }; requestAnimationFrame(compose); const stream=rec.captureStream(30); let mr; try{ mr=new MediaRecorder(stream,{mimeType:mime, videoBitsPerSecond: 5_000_000}); }catch{ mr=new MediaRecorder(stream,{mimeType:mime}); }
+  function startRecording(){ const rec=recRef.current, base=baseRef.current, ui=uiRef.current; if(!rec||!base||!ui||!canRecord) return; const r=rec.getContext('2d'); rec.width=base.width; rec.height=base.height; const mime=pickMime(); if(!mime){ setMsg('Recording not supported on this device/browser'); return; } recordedChunksRef.current=[]; setRecording(true); recordingRef.current=true; const targetFps = 60; const compose=()=>{ if(!recordingRef.current) return; r.clearRect(0,0,rec.width,rec.height); r.drawImage(base,0,0); r.drawImage(ui,0,0); requestAnimationFrame(compose); }; requestAnimationFrame(compose); const stream=rec.captureStream(targetFps); let mr; try{ mr=new MediaRecorder(stream,{mimeType:mime, videoBitsPerSecond: 8_000_000}); }catch{ mr=new MediaRecorder(stream,{mimeType:mime}); }
     mr.ondataavailable=(e)=>{ if(e.data && e.data.size>0) recordedChunksRef.current.push(e.data); };
     mr.onstop=()=>{ const chunks=recordedChunksRef.current; const type=mr.mimeType||mime; const blob=new Blob(chunks,{type}); if(!blob || blob.size<150000){ setMsg('Recording tiny — Safari ограничил кодек. Попробуй ещё раз или используй системную запись экрана.'); return; } const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; const ts=new Date().toISOString().replace(/[:.]/g,'-'); a.download=`pullup-rescue-${ts}.${type.includes('mp4')?'mp4':'webm'}`; a.click(); setMsg('Recording saved'); };
     mediaRecorderRef.current=mr; try{ mr.start(500); }catch{ mr.start(); }
@@ -120,12 +105,9 @@ export default function PullUpRescueV39(){
         style={{position:'absolute',inset:0,touchAction:'none'}} />
       <canvas ref={recRef} style={{display:'none'}} />
 
-      {/* Top bar */}
+      {/* Top bar — только выбор камеры и старт/пауза; счётчик рисуем на канвасе */}
       <div style={{position:'absolute',top:0,left:0,right:0,padding:'10px env(safe-area-inset-right) 10px env(safe-area-inset-left)',display:'flex',justifyContent:'space-between',alignItems:'center',gap:8}}>
-        <div style={{display:'flex',gap:8,alignItems:'center'}}>
-          <div style={{fontSize:14,opacity:.9}}>Pull‑Up Rescue</div>
-          <div style={{background:'rgba(0,0,0,.35)',padding:'6px 10px',borderRadius:10,fontSize:14}}>Reps: <b>{reps}</b></div>
-        </div>
+        <div style={{fontSize:14,opacity:.9}}>Pull‑Up Rescue</div>
         <div style={{display:'flex',gap:8,alignItems:'center'}}>
           {camReady && (
             <select value={bucketChoice} onChange={async(e)=>{ const b=e.target.value; await switchToBucket(b); }} style={{background:'rgba(255,255,255,.12)',color:'#fff',border:0,borderRadius:10,padding:'6px'}}>
@@ -152,7 +134,7 @@ export default function PullUpRescueV39(){
           ) : (
             <button onClick={stopRecording} style={btn(1,'#ef4444')}>Stop</button>
           )}
-          <button onClick={()=>{ setReps(0); repRef.current={phase:'down',lastAbove:0,lastRepAt:0}; }} style={btn()}>Reset reps</button>
+          <button onClick={()=>{ setReps(0); repsRef.current=0; repRef.current={phase:'down',lastAbove:0,lastRepAt:0}; }} style={btn()}>Reset reps</button>
         </div>
         <div style={{display:'grid',gridTemplateColumns:'1fr auto',alignItems:'center',gap:8}}>
           <Labeled label={`Sensitivity (px above bar): ${sensitivity}`}>
