@@ -5,12 +5,12 @@ import "@tensorflow/tfjs-backend-webgl";
 import "@tensorflow/tfjs-converter";
 
 /**
- * v5.3 —
- *  - Rope sprite scaling: separate X/Y (and uniform via helper)
- *  - Attached cat follows nose Y while above threshold
- *  - Delayed drop: must stay BELOW threshold for a short travel before release
- *  - Centered counter with glassy UI
- *  - Regression fix: counting restored
+ * v5.4 — FIX: Saved counter not increasing
+ * Root cause: the RAF tick() function captured a stale React state value (saved=0)
+ * and kept drawing that forever. Switched to savedRef for the animation loop,
+ * while still updating React state for any external UI needs.
+ *
+ * Includes v5.3 features (rope scale XY, attach follow, delayed drop, centered HUD).
  */
 
 // ===================== CALIBRATION =====================
@@ -26,23 +26,13 @@ export const CAT_GLOBAL_SCALE = 1.5;
 export const CAT_PER_STATE_SCALE = { idle:1.00, attached:1.00, falling:1.00, seated:0.90 };
 export const CAT_Y_NUDGE_PX = { idle:0, attached:0, falling:0, seated:0 };
 
-// ——— Rope scaling (NEW) ———
-/**
- * Uniform scale for fire.png width relative to screen width.
- *   renderW = screenW * ROPE_SCALE_X
- *   renderH = (imgH * renderW / imgW) * ROPE_SCALE_Y
- * Позиция по X центрируется. Поднять/опустить верёвку — перетаскиванием как раньше.
- */
-export const ROPE_SCALE_X = 1.50; // 1.0 = во всю ширину экрана; 0.9 = чуть короче
-export const ROPE_SCALE_Y = 1.00; // 1.0 = исходная высота, >1 — выше огонь, <1 — ниже
+// ——— Rope scaling (X/Y) ———
+export const ROPE_SCALE_X = 1.00; // width relative to screen width
+export const ROPE_SCALE_Y = 1.00; // vertical stretch of entire fire.png
 
-// ——— Drop behavior (NEW) ———
-/**
- * Насколько НИЖЕ порога нужно «пронести» кота до отцепления (device px)
- * и минимум времени, которое он должен быть ниже порога.
- */
-export const DROP_TRAVEL_BELOW_PX = 100;  // расстояние проноса
-export const DROP_MIN_TIME_MS = 200;     // минимум времени ниже порога
+// ——— Drop behavior ———
+export const DROP_TRAVEL_BELOW_PX = 10;  // carry distance below threshold before release
+export const DROP_MIN_TIME_MS = 200;     // minimum time below threshold before release
 // =======================================================
 
 const SPRITES = {
@@ -56,7 +46,7 @@ const SPRITES = {
 const MOVENET_EDGES = { 0:[0,1],1:[1,3],2:[0,2],3:[2,4],4:[5,7],5:[7,9],6:[6,8],7:[8,10],8:[5,6],9:[5,11],10:[6,12],11:[11,12],12:[11,13],13:[13,15],14:[12,14],15:[14,16] };
 function updateRepState(prev, isAbove, now, minAboveMs = 160, minIntervalMs = 420){ const next={...prev}; let counted=0; if(prev.phase==='down'&&isAbove){next.phase='up'; next.lastAbove=now;} else if(prev.phase==='up'&&!isAbove){ if(now-prev.lastAbove>minAboveMs && now-prev.lastRepAt>minIntervalMs){ next.phase='down'; next.lastRepAt=now; counted=1;} else { next.phase='down'; } } return {next, counted}; }
 
-export default function PullUpRescueV53(){
+export default function PullUpRescueV54(){
   const videoRef = useRef(null); const baseRef=useRef(null); const uiRef=useRef(null); const recRef=useRef(null);
   const detectorRef=useRef(null); const rafRef=useRef(null); const streamRef=useRef(null);
   const inferCanvasRef=useRef(document.createElement('canvas'));
@@ -72,7 +62,11 @@ export default function PullUpRescueV53(){
   const [sensitivity,setSensitivity]=useState(DEFAULT_SENSITIVITY); const sensitivityRef=useRef(DEFAULT_SENSITIVITY);
   const [showPose,setShowPose]=useState(true);
 
+  // Saved counter: state + ref (RAF uses ref to avoid stale values)
   const [saved,setSaved]=useState(0);
+  const savedRef = useRef(0);
+  useEffect(()=>{ savedRef.current = saved; }, [saved]);
+
   const repRef=useRef({phase:'down',lastAbove:0,lastRepAt:0});
 
   const geomRef = useRef({ W:0,H:0,vw:0,vh:0,scale:1,dx:0,dy:0, mirrored:false });
@@ -122,14 +116,12 @@ export default function PullUpRescueV53(){
       const pose = lastPoseRef.current; if(pose){ const kps=pose.keypoints; const {s,ix,iy}=inferMapRef.current; const mapped=kps.map((kp)=>{ const xv=(kp.x-ix)/s; const yv=(kp.y-iy)/s; const xd = dx + (mirrored ? (vw - xv) : xv) * scale; const yd = dy + yv * scale; return {X:xd,Y:yd,score:kp.score, raw:{xv,yv}}; });
         if(showPose){ u.save(); u.strokeStyle='rgba(255,255,255,.9)'; u.lineWidth=2; drawPoseMapped(u,mapped); u.restore(); }
         const nose = mapped[0]; const by=barYRef.current; const sens=sensitivityRef.current; if(nose?.score>0.4 && by!==null){ const thr=by - sens; const above = nose.Y <= thr; const {next}=updateRepState(repRef.current,above,now); repRef.current=next;
-          // Attach movement (follow nose while above threshold)
           if(above){ if(catRef.current.mode==='idle'){ catRef.current.mode='attached'; catRef.current.attachDy = (by - CAT_BASELINE_ABOVE_ROPE_PX*(window.devicePixelRatio||1)) - nose.Y; }
-            // follow Y with preserved attach offset (a little smoothing)
             const targetY = nose.Y + catRef.current.attachDy; catRef.current.y += (targetY - catRef.current.y) * 0.45; catRef.current.x = nose.X; catRef.current.belowStart = 0; }
-          else { // below threshold — start delayed drop window
+          else {
             if(catRef.current.mode==='attached'){
               if(!catRef.current.belowStart) catRef.current.belowStart = now;
-              const travelEnough = (thr - nose.Y) < -DROP_TRAVEL_BELOW_PX; // nose sufficiently below
+              const travelEnough = (thr - nose.Y) < -DROP_TRAVEL_BELOW_PX;
               const timeEnough = (now - catRef.current.belowStart) >= DROP_MIN_TIME_MS;
               if(travelEnough && timeEnough){ startCatFall(); }
             }
@@ -143,7 +135,7 @@ export default function PullUpRescueV53(){
     drawThreshold(u,W,H,barYRef.current,sensitivityRef.current);
     drawSeatedCats(u,imgs);
     drawActiveCat(u,imgs);
-    drawSavedCounter(u,W,H,saved);
+    drawSavedCounter(u,W,H,savedRef.current); // <— use ref so HUD shows latest value immediately
 
     rafRef.current=requestAnimationFrame(tick);
   };
@@ -159,14 +151,17 @@ export default function PullUpRescueV53(){
   function catHeightFor(img, w){ return w * (img.height/img.width); }
 
   // Cats
-  function spawnCatCentered(){ const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const W=u.width; const y=barYRef.current ?? Math.floor(u.height*0.5); catRef.current={ mode:'idle', x:Math.floor(W/2), y:y - CAT_BASELINE_ABOVE_ROPE_PX*p + (CAT_Y_NUDGE_PX.idle||0)*p, vx:0, vy:0, lastT:performance.now(), attachDy:0, belowStart:0 }; }
+  function spawnCatCentered(){ const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const W=u.width; const y=barYRef.current ?? Math.floor(u.height*0.5); catRef.current={ mode:'idle', x:Math.floor(W/2), y:y - CAT_BASELINE_ABOVE_ROPE_PX*p + (0), vx:0, vy:0, lastT:performance.now(), attachDy:0, belowStart:0 }; }
   function startCatFall(){ const now=performance.now(); const c=catRef.current; c.mode='falling'; c.vx=(Math.random()*2-1)*24; c.vy=0; c.lastT=now; c.belowStart=0; }
-  function stepActiveCat(){ const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const H=u.height; const groundY=H-28*p; const c=catRef.current; const now=performance.now(); const dt=Math.min(0.05,(now-c.lastT)/1000); c.lastT=now; if(c.mode==='falling'){ const g=1200*p; c.vy += g*dt; c.y += c.vy*dt; c.x += c.vx*dt; if(c.y >= groundY){ c.y=groundY; c.mode='seated'; const seat = placeSeatedCat(u); seatedCatsRef.current.push(seat); setSaved(v=>v+1); setTimeout(()=>{ spawnCatCentered(); }, 250); } } }
+  function stepActiveCat(){ const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const H=u.height; const groundY=H-28*p; const c=catRef.current; const now=performance.now(); const dt=Math.min(0.05,(now-c.lastT)/1000); c.lastT=now; if(c.mode==='falling'){ const g=1200*p; c.vy += g*dt; c.y += c.vy*dt; c.x += c.vx*dt; if(c.y >= groundY){ c.y=groundY; c.mode='seated'; const seat = placeSeatedCat(u); seatedCatsRef.current.push(seat);
+        // update both ref and React state
+        savedRef.current = savedRef.current + 1; setSaved(v=>v+1);
+        setTimeout(()=>{ spawnCatCentered(); }, 250); } } }
   function placeSeatedCat(u){ const p=window.devicePixelRatio||1; const W=u.width; const H=u.height; const margin=20*p; const spacing=56*p; const baseY=H-28*p; const count=seatedCatsRef.current.length; const maxPerRow=Math.floor((W-2*margin)/spacing); const row=Math.floor(count/maxPerRow); const col=count%maxPerRow; const x=margin + col*spacing; const y=baseY - row*spacing*0.75; return {x,y}; }
-  function drawSeatedCats(ctx,imgs){ const im = imgs.cat_seated; if(!im) return; const w = catWidthPx('seated'); const h = catHeightFor(im,w); for(const s of seatedCatsRef.current){ const dpr=window.devicePixelRatio||1; const yNudge=(CAT_Y_NUDGE_PX.seated||0)*dpr; ctx.drawImage(im, Math.round(s.x - w/2), Math.round(s.y - h + yNudge), w, h); } }
-  function drawActiveCat(ctx,imgs){ const c=catRef.current; stepActiveCat(); if(!c) return; const state = c.mode==='attached' ? 'attached' : (c.mode==='falling' ? 'falling' : 'idle'); const im = state==='attached' ? imgs.cat_attached : (state==='falling' ? imgs.cat_jump : imgs.cat_idle); if(!im) return; const w = catWidthPx(state); const h = catHeightFor(im,w); const dpr=window.devicePixelRatio||1; const yNudge=(CAT_Y_NUDGE_PX[state]||0)*dpr; ctx.drawImage(im, Math.round(c.x - w/2), Math.round(c.y - h + yNudge), w, h); }
+  function drawSeatedCats(ctx,imgs){ const im = imgs.cat_seated; if(!im) return; const w = catWidthPx('seated'); const h = catHeightFor(im,w); for(const s of seatedCatsRef.current){ ctx.drawImage(im, Math.round(s.x - w/2), Math.round(s.y - h), w, h); } }
+  function drawActiveCat(ctx,imgs){ const c=catRef.current; stepActiveCat(); if(!c) return; const state = c.mode==='attached' ? 'attached' : (c.mode==='falling' ? 'falling' : 'idle'); const im = state==='attached' ? imgs.cat_attached : (state==='falling' ? imgs.cat_jump : imgs.cat_idle); if(!im) return; const w = catWidthPx(state); const h = catHeightFor(im,w); ctx.drawImage(im, Math.round(c.x - w/2), Math.round(c.y - h), w, h); }
 
-  // UI counter (center top)
+  // Centered counter HUD
   function drawSavedCounter(ctx,W,H,val){ const p=window.devicePixelRatio||1; const pad=10*p; const boxW=180*p, boxH=56*p; const x=(W-boxW)/2, y=pad; ctx.save(); ctx.fillStyle='rgba(0,0,0,.35)'; ctx.beginPath(); const r=12*p; roundRect(ctx,x,y,boxW,boxH,r); ctx.fill(); ctx.font=`${14*p}px system-ui`; ctx.fillStyle='#fff'; ctx.fillText('Saved', x+14*p, y+20*p); ctx.font=`${28*p}px system-ui`; ctx.fillText(`${val}`, x+14*p, y+44*p); ctx.restore(); }
   function roundRect(ctx,x,y,w,h,r){ ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); }
 
@@ -227,7 +222,7 @@ export default function PullUpRescueV53(){
           ) : (
             <button onClick={stopRecording} style={btn(1,'#ef4444')}>Stop</button>
           )}
-          <button onClick={()=>{ setSaved(0); repRef.current={phase:'down',lastAbove:0,lastRepAt:0}; seatedCatsRef.current=[]; spawnCatCentered(); }} style={btn()}>Reset</button>
+          <button onClick={()=>{ savedRef.current=0; setSaved(0); repRef.current={phase:'down',lastAbove:0,lastRepAt:0}; seatedCatsRef.current=[]; spawnCatCentered(); }} style={btn()}>Reset</button>
         </div>
         <div style={{display:'grid',gridTemplateColumns:'1fr auto',alignItems:'center',gap:8}}>
           <Labeled label={`Sensitivity (px above rope): ${sensitivity}`}>
@@ -246,4 +241,3 @@ export default function PullUpRescueV53(){
 
 function btn(opacity=1,bg){ return {border:0,borderRadius:14,padding:'10px 12px',background:bg||'rgba(255,255,255,.12)',color:'#fff',opacity,backdropFilter:'saturate(120%) blur(6px)'}; }
 function Labeled({label,children}){ return (<div><div style={{fontSize:11,opacity:.75,marginBottom:4}}>{label}</div>{children}</div>); }
-
