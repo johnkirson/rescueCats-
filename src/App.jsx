@@ -5,12 +5,13 @@ import "@tensorflow/tfjs-backend-webgl";
 import "@tensorflow/tfjs-converter";
 
 /**
- * v4.6 — Bug fixes & alignment
- * - Rope: keep original aspect (scale-to-width), no vertical squash
- * - Rope baseline tied to a tunable constant; aligns with barY precisely
- * - Cat sits ON rope (baseline offset constant)
- * - Pose overlay was erased each frame (clear happened AFTER draw) → moved clear BEFORE UI draw
- * - Detection runs while recording (unchanged), but now pose is visible
+ * v4.7 — Pose alignment + state sync
+ * - FIX: pose overlay shifted on iOS front camera.
+ *   We now run detector WITHOUT flipHorizontal and mirror only at render time
+ *   (video is mirrored for front cam, detector sees raw frames).
+ * - FIX: barY/sensitivity were read from stale refs → reps/threshold/rope lagged.
+ *   Now synchronized via useEffect to refs.
+ * - Cat baseline tuned: sits ON the rope (offset +10px*dpr), tweak via constant.
  */
 
 const SPRITES = {
@@ -21,15 +22,15 @@ const SPRITES = {
   cat_seated: "/assets/4.png",
 };
 
-// --- Tunables (easy to tweak on device) ---
-const ROPE_BASELINE_FROM_BOTTOM = 0.12; // fraction of rope sprite height to baseline (0 = bottom edge). Tweak if rope line looks off
-const CAT_BASELINE_ABOVE_ROPE_PX = 4;   // how many device pixels above rope baseline стоят лапки кота
-const INFER_EVERY_MS = 70;              // ~14 Hz
+// Tunables
+const ROPE_BASELINE_FROM_BOTTOM = 0.12; // where the rope baseline is inside the sprite (0..1 from bottom)
+const CAT_BASELINE_ABOVE_ROPE_PX = 10;   // how many device pixels ABOVE the rope baseline the cat's feet are
+const INFER_EVERY_MS = 70;               // ~14Hz pose estimation
 
 const MOVENET_EDGES = { 0:[0,1],1:[1,3],2:[0,2],3:[2,4],4:[5,7],5:[7,9],6:[6,8],7:[8,10],8:[5,6],9:[5,11],10:[6,12],11:[11,12],12:[11,13],13:[13,15],14:[12,14],15:[14,16] };
 function updateRepState(prev, isAbove, now, minAboveMs = 160, minIntervalMs = 420){ const next={...prev}; let counted=0; if(prev.phase==='down'&&isAbove){next.phase='up'; next.lastAbove=now;} else if(prev.phase==='up'&&!isAbove){ if(now-prev.lastAbove>minAboveMs && now-prev.lastRepAt>minIntervalMs){ next.phase='down'; next.lastRepAt=now; counted=1;} else { next.phase='down'; } } return {next, counted}; }
 
-export default function PullUpRescueV46(){
+export default function PullUpRescueV47(){
   const videoRef = useRef(null); const baseRef=useRef(null); const uiRef=useRef(null); const recRef=useRef(null);
   const detectorRef=useRef(null); const rafRef=useRef(null); const streamRef=useRef(null);
   const inferCanvasRef=useRef(document.createElement('canvas'));
@@ -46,7 +47,7 @@ export default function PullUpRescueV46(){
   const [showPose,setShowPose]=useState(true);
 
   // counters & cats
-  const [saved,setSaved]=useState(0); const savedRef=useRef(0);
+  const [saved,setSaved]=useState(0);
   const repRef=useRef({phase:'down',lastAbove:0,lastRepAt:0});
 
   // geometry
@@ -64,12 +65,18 @@ export default function PullUpRescueV46(){
   const [imgs,setImgs]=useState({});
   useEffect(()=>{ const names=Object.entries(SPRITES); const loaded={}; let left=names.length; names.forEach(([k,src])=>{ const im=new Image(); im.onload=()=>{ loaded[k]=im; left--; if(left===0) setImgs(loaded); }; im.src=src; }); },[]);
 
+  // helpers
   const isFrontLabel = (label='') => /front|user|face/i.test(label);
   const isUltraLabel = (label='') => /ultra\s*wide|0\.5x|ultra/i.test(label);
   const isTeleLabel  = (label='') => /tele|2x|3x|zoom/i.test(label);
 
+  // sync simple refs
+  useEffect(()=>{ barYRef.current = barY; ropeRef.current.y = barY; },[barY]);
+  useEffect(()=>{ sensitivityRef.current = sensitivity; },[sensitivity]);
+
+  // boot & resize
   useEffect(()=>{ const c=document.createElement('canvas'); setCanRecord(typeof c.captureStream==='function' && 'MediaRecorder' in window); },[]);
-  useEffect(()=>{ const resize=()=>{ const dpr=Math.max(1,Math.min(3,window.devicePixelRatio||1)); const W=window.innerWidth,H=window.innerHeight; [baseRef.current,uiRef.current,recRef.current].forEach(cv=>{ if(!cv) return; cv.style.width=W+'px'; cv.style.height=H+'px'; cv.width=Math.floor(W*dpr); cv.height=Math.floor(H*dpr);}); if (uiRef.current && barYRef.current==null) { const mid=Math.floor(uiRef.current.height*0.5); setBarY(mid); ropeRef.current.y=mid; spawnCatCentered(); } updateGeom(); }; resize(); window.addEventListener('resize',resize); return()=>window.removeEventListener('resize',resize); },[]);
+  useEffect(()=>{ const resize=()=>{ const dpr=Math.max(1,Math.min(3,window.devicePixelRatio||1)); const W=window.innerWidth,H=window.innerHeight; [baseRef.current,uiRef.current,recRef.current].forEach(cv=>{ if(!cv) return; cv.style.width=W+'px'; cv.style.height=H+'px'; cv.width=Math.floor(W*dpr); cv.height=Math.floor(H*dpr);}); if (uiRef.current && barYRef.current==null) { const mid=Math.floor(uiRef.current.height*0.5); setBarY(mid); } updateGeom(); if(!catRef.current.lastT) spawnCatCentered(); }; resize(); window.addEventListener('resize',resize); return()=>window.removeEventListener('resize',resize); },[]);
 
   function updateGeom(){ const video=videoRef.current, base=baseRef.current; if(!video||!base) return; const W=base.width,H=base.height; const vw=video.videoWidth||1280, vh=video.videoHeight||720; const scale=Math.max(W/vw,H/vh); const dw=vw*scale, dh=vh*scale; const dx=(W-dw)/2, dy=(H-dh)/2; geomRef.current={...geomRef.current, W,H,vw,vh,scale,dx,dy}; const inW=320; const inH=Math.round(inW*vh/vw)||240; const c=inferCanvasRef.current; c.width=inW; c.height=inH; }
   function setMirrorFromStream(stream){ try{ const track=stream.getVideoTracks?.()[0]; const s=track?.getSettings?.()||{}; const label=track?.label||''; const mirrored = s.facingMode ? /user|front/i.test(s.facingMode) : isFrontLabel(label); geomRef.current={...geomRef.current, mirrored}; }catch{} }
@@ -87,15 +94,16 @@ export default function PullUpRescueV46(){
       if(streamRef.current) streamRef.current.getTracks().forEach(t=>t.stop()); const v=videoRef.current; v.srcObject=stream; await v.play(); streamRef.current=stream; setMirrorFromStream(stream); updateGeom(); const label = stream.getVideoTracks?.()[0]?.label || ''; const finalBucket = /front|user|face/i.test(label) ? 'front' : (/ultra\s*wide|0\.5x|ultra/i.test(label) ? 'ultra' : 'wide'); setBucketChoice(finalBucket); return finalBucket; }catch(e){ setDebug(`Switch failed: ${e.name}`); return bucket; } }
 
   const tick = async ()=>{ const video=videoRef.current, base=baseRef.current, ui=uiRef.current; if(!video||!base||!ui) return; const b=base.getContext('2d'); const u=ui.getContext('2d'); const {W,H,vw,vh,scale,dx,dy,mirrored}=geomRef.current; const inC=inferCanvasRef.current; if(!W) updateGeom();
-    // base: camera
+    // BASE: camera
     b.clearRect(0,0,W,H); const dw=vw*scale, dh=vh*scale; if(mirrored){ b.save(); b.translate(W,0); b.scale(-1,1); b.drawImage(video, -dx - dw + W, dy, dw, dh); b.restore(); } else { b.drawImage(video, dx, dy, dw, dh); }
 
-    // UI: first clear, then draw ALL overlays (fixes erased pose)
+    // UI: clear first
     u.clearRect(0,0,W,H);
 
-    // throttled pose inference while recording
-    const now=performance.now(); if(recordingRef.current && detectorRef.current){ if(now - lastInferRef.current >= INFER_EVERY_MS){ lastInferRef.current=now; const ic=inC.getContext('2d'); const s=Math.max(inC.width/vw, inC.height/vh); const iw=vw*s, ih=vh*s; const ix=(inC.width-iw)/2, iy=(inC.height-ih)/2; ic.drawImage(video, ix, iy, iw, ih); try{ const poses=await detectorRef.current.estimatePoses(inC,{maxPoses:1,flipHorizontal: mirrored}); lastPoseRef.current = poses && poses[0] ? poses[0] : null; }catch(e){} }
-      const pose = lastPoseRef.current; if(pose){ const kps=pose.keypoints; if(showPose){ u.save(); u.strokeStyle='rgba(255,255,255,.85)'; u.lineWidth=2; const mapped=kps.map((kp)=>({ X: mirrored ? (dx + dw - kp.x*scale) : (dx + kp.x*scale), Y: dy + kp.y*scale, score: kp.score })); drawPoseMapped(u,mapped); u.restore(); }
+    // Pose inference while recording
+    const now=performance.now(); if(recordingRef.current && detectorRef.current){ if(now - lastInferRef.current >= INFER_EVERY_MS){ lastInferRef.current=now; const ic=inC.getContext('2d'); const s=Math.max(inC.width/vw, inC.height/vh); const iw=vw*s, ih=vh*s; const ix=(inC.width-iw)/2, iy=(inC.height-ih)/2; ic.drawImage(video, ix, iy, iw, ih); try{ // IMPORTANT: no flipHorizontal here
+            const poses=await detectorRef.current.estimatePoses(inC,{maxPoses:1,flipHorizontal:false}); lastPoseRef.current = poses && poses[0] ? poses[0] : null; }catch(e){} }
+      const pose = lastPoseRef.current; if(pose){ const kps=pose.keypoints; if(showPose){ u.save(); u.strokeStyle='rgba(255,255,255,.9)'; u.lineWidth=2; const mapped=kps.map((kp)=>({ X: mirrored ? (dx + dw - kp.x*scale) : (dx + kp.x*scale), Y: dy + kp.y*scale, score: kp.score })); drawPoseMapped(u,mapped); u.restore(); }
         const nose=kps[0]; const by=barYRef.current; const sens=sensitivityRef.current; if(nose?.score>0.4 && by!==null){ const thr=by - sens; const ny = dy + nose.y*scale; const above = ny <= thr; const {next}=updateRepState(repRef.current,above,now); const wasAttached = catRef.current.mode==='attached'; repRef.current=next; if(above && catRef.current.mode==='idle'){ catRef.current.mode='attached'; }
           if(!above && wasAttached && next.phase==='down' && catRef.current.mode==='attached'){ startCatFall(); }
           if(catRef.current.mode==='attached'){ const p=window.devicePixelRatio||1; catRef.current.x = mirrored ? (dx + dw - nose.x*scale) : (dx + nose.x*scale); catRef.current.y = by - CAT_BASELINE_ABOVE_ROPE_PX*p; }
@@ -103,24 +111,22 @@ export default function PullUpRescueV46(){
       }
     }
 
-    // Rope first, then threshold, cats, counter
-    drawRopeSprite(u,W,H,ropeRef.current.y,imgs.rope);
+    // overlays order
+    drawRopeSprite(u,W,H,barYRef.current,imgs.rope);
     drawThreshold(u,W,H,barYRef.current,sensitivityRef.current);
     drawSeatedCats(u,imgs);
     drawActiveCat(u,imgs);
-    drawSavedCounter(u,W,H,savedRef.current);
+    drawSavedCounter(u,W,H,saved);
 
     rafRef.current=requestAnimationFrame(tick);
   };
 
   function drawPoseMapped(ctx,kps){ const edges = MOVENET_EDGES; for(const [i,j] of Object.values(edges)){ const a=kps[i],b=kps[j]; if(a?.score>0.3&&b?.score>0.3){ ctx.beginPath(); ctx.moveTo(a.X,a.Y); ctx.lineTo(b.X,b.Y); ctx.stroke(); } } for(const k of kps){ if(k.score>0.3){ ctx.beginPath(); ctx.arc(k.X,k.Y,3,0,Math.PI*2); ctx.fillStyle='rgba(255,255,255,.95)'; ctx.fill(); } } }
 
-  // --- Rope sprite (keep aspect) ---
-  function drawRopeSprite(ctx,W,H,y,img){ if(y==null||!img) return; const scale = W / img.width; const renderW = W; const renderH = img.height * scale; // keep aspect
-    const baseline = renderH * (1 - ROPE_BASELINE_FROM_BOTTOM); // distance from top to baseline
-    const yTop = Math.round(y - baseline); ctx.drawImage(img, 0, yTop, renderW, renderH); }
+  // Rope sprite keep aspect
+  function drawRopeSprite(ctx,W,H,y,img){ if(y==null||!img) return; const scale = W / img.width; const renderW = W; const renderH = img.height * scale; const baseline = renderH * (1 - ROPE_BASELINE_FROM_BOTTOM); const yTop = Math.round(y - baseline); ctx.drawImage(img, 0, yTop, renderW, renderH); }
 
-  // --- Cats ---
+  // Cats
   function spawnCatCentered(){ const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const W=u.width; const y=barYRef.current ?? Math.floor(u.height*0.5); catRef.current={ mode:'idle', x:Math.floor(W/2), y:y - CAT_BASELINE_ABOVE_ROPE_PX*p, vx:0, vy:0, lastT:performance.now() }; }
   function startCatFall(){ const now=performance.now(); const c=catRef.current; c.mode='falling'; c.vx=(Math.random()*2-1)*24; c.vy=0; c.lastT=now; }
   function stepActiveCat(){ const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const H=u.height; const groundY=H-28*p; const c=catRef.current; const now=performance.now(); const dt=Math.min(0.05,(now-c.lastT)/1000); c.lastT=now; if(c.mode==='falling'){ const g=1200*p; c.vy += g*dt; c.y += c.vy*dt; c.x += c.vx*dt; if(c.y >= groundY){ c.y=groundY; c.mode='seated'; const seat = placeSeatedCat(u); seatedCatsRef.current.push(seat); setSaved(v=>v+1); setTimeout(()=>{ spawnCatCentered(); }, 250); } } }
@@ -131,17 +137,18 @@ export default function PullUpRescueV46(){
   function drawSavedCounter(ctx,W,H,val){ const p=window.devicePixelRatio||1; const pad=14*p; const boxW=140*p, boxH=56*p; const x=W - boxW - pad, y=pad; ctx.fillStyle='rgba(0,0,0,.35)'; ctx.fillRect(x,y,boxW,boxH); ctx.font=`${14*p}px system-ui`; ctx.fillStyle='#fff'; ctx.fillText('Saved', x+12*p, y+20*p); ctx.font=`${26*p}px system-ui`; ctx.fillText(`${val}`, x+12*p, y+44*p); }
   function drawThreshold(ctx,W,H,barY,sensitivity){ if(barY==null) return; const p=window.devicePixelRatio||1; const thr=barY - sensitivity; ctx.save(); ctx.setLineDash([16*p, 10*p]); ctx.lineWidth=4*p; ctx.strokeStyle='#00ff88'; ctx.beginPath(); ctx.moveTo(0,thr); ctx.lineTo(W,thr); ctx.stroke(); ctx.setLineDash([]); ctx.beginPath(); ctx.arc(W-40*p,thr,10*p,0,Math.PI*2); ctx.fillStyle='#00ff88'; ctx.fill(); ctx.restore(); }
 
-  // Dragging
+  // interactions
   const draggingRef=useRef(false);
-  function onPointerDown(e){ const y=getY(e); if(y==null) return; setBarY(y); ropeRef.current.y=y; if(catRef.current.mode==='idle') catRef.current.y=y - CAT_BASELINE_ABOVE_ROPE_PX*(window.devicePixelRatio||1); draggingRef.current=true; }
-  function onPointerMove(e){ if(!draggingRef.current) return; const y=getY(e); if(y==null) return; setBarY(y); ropeRef.current.y=y; if(catRef.current.mode==='idle') catRef.current.y=y - CAT_BASELINE_ABOVE_ROPE_PX*(window.devicePixelRatio||1); }
+  function onPointerDown(e){ const y=getY(e); if(y==null) return; setBarY(y); if(catRef.current.mode==='idle') alignCatToBar(); draggingRef.current=true; }
+  function onPointerMove(e){ if(!draggingRef.current) return; const y=getY(e); if(y==null) return; setBarY(y); if(catRef.current.mode==='idle') alignCatToBar(); }
   function onPointerUp(){ draggingRef.current=false; }
+  function alignCatToBar(){ const p=window.devicePixelRatio||1; catRef.current.y = (barYRef.current ?? 0) - CAT_BASELINE_ABOVE_ROPE_PX*p; }
   function onTouchStart(e){ e.preventDefault(); onPointerDown(e); }
   function onTouchMove(e){ e.preventDefault(); onPointerMove(e); }
   function onTouchEnd(e){ e.preventDefault(); onPointerUp(); }
   function getY(e){ const rect=uiRef.current.getBoundingClientRect(); const dpr=uiRef.current.width/rect.width; if(e.touches&&e.touches[0]) return (e.touches[0].clientY-rect.top)*dpr; if(typeof e.clientY==='number') return (e.clientY-rect.top)*dpr; return null; }
 
-  // Recording — Start=Record, Stop=Pause
+  // Recording
   const mediaRecorderRef=useRef(null); const recordedChunksRef=useRef([]);
   function isiOSSafari(){ return /iP(hone|ad|od)/.test(navigator.userAgent) && /Safari\//.test(navigator.userAgent) && !/CriOS|FxiOS/.test(navigator.userAgent); }
   function pickMime(){ const prefer = isiOSSafari() ? ['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4'] : []; const fall=['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']; const opts=[...prefer,...fall]; for(const o of opts){ try{ if(window.MediaRecorder && MediaRecorder.isTypeSupported(o)) return o; }catch{} } return ''; }
@@ -185,7 +192,7 @@ export default function PullUpRescueV46(){
           ) : (
             <button onClick={stopRecording} style={btn(1,'#ef4444')}>Stop</button>
           )}
-          <button onClick={()=>{ setSaved(0); savedRef.current=0; repRef.current={phase:'down',lastAbove:0,lastRepAt:0}; seatedCatsRef.current=[]; spawnCatCentered(); }} style={btn()}>Reset</button>
+          <button onClick={()=>{ setSaved(0); repRef.current={phase:'down',lastAbove:0,lastRepAt:0}; seatedCatsRef.current=[]; spawnCatCentered(); }} style={btn()}>Reset</button>
         </div>
         <div style={{display:'grid',gridTemplateColumns:'1fr auto',alignItems:'center',gap:8}}>
           <Labeled label={`Sensitivity (px above rope): ${sensitivity}`}>
