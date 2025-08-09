@@ -5,18 +5,18 @@ import "@tensorflow/tfjs-backend-webgl";
 import "@tensorflow/tfjs-converter";
 
 /**
- * v3.6 — Fixes
- * 1) DRAG/SENSITIVITY not reacting: tick() had stale closures.
- *    ➜ move dynamic values to refs (barY,sensitivity,detecting,useBack)
- * 2) Recording empty/unsaved on iOS: use best mime (prefer mp4), start with timeslice,
- *    and assert non‑zero blob; compose every frame.
- * 3) Keep: one‑screen UI, iOS camera bring‑up, MoveNet enum.
+ * v3.7 — MVP
+ * ✔ Translucent pose overlay (so видно, как трекает модель)
+ * ✔ Простой счёт подтягиваний (по носу относительно порога)
+ * ✔ Надёжная запись (фикс: ставим recording=true ПЕРЕД композит‑циклом;
+ *   webm приоритетно; mp4 только если действительно поддерживается)
+ * ✔ Драг планки (iOS‑safe), Sensitivity, Flip, Enable Camera
  */
 
 const MOVENET_EDGES = { 0:[0,1],1:[1,3],2:[0,2],3:[2,4],4:[5,7],5:[7,9],6:[6,8],7:[8,10],8:[5,6],9:[5,11],10:[6,12],11:[11,12],12:[11,13],13:[13,15],14:[12,14],15:[14,16] };
 function updateRepState(prev, isAbove, now, minAboveMs = 200, minIntervalMs = 500){ const next={...prev}; let counted=0; if(prev.phase==='down'&&isAbove){next.phase='up'; next.lastAbove=now;} else if(prev.phase==='up'&&!isAbove){ if(now-prev.lastAbove>minAboveMs && now-prev.lastRepAt>minIntervalMs){ next.phase='down'; next.lastRepAt=now; counted=1;} else { next.phase='down'; } } return {next, counted}; }
 
-export default function PullUpRescueV36(){
+export default function PullUpRescueV37(){
   const videoRef = useRef(null); const baseRef=useRef(null); const uiRef=useRef(null); const recRef=useRef(null);
   const detectorRef=useRef(null); const rafRef=useRef(null); const streamRef=useRef(null);
 
@@ -24,11 +24,13 @@ export default function PullUpRescueV36(){
   const [camReady,setCamReady]=useState(false);
   const [useBack,setUseBack]=useState(true); const useBackRef=useRef(true);
   const [msg,setMsg]=useState("Drag the bar to the pull‑up bar height, then Start"); const [debug,setDebug]=useState("");
-  const [cats,setCats]=useState(0);
+  const [reps,setReps]=useState(0);
   const [detecting,setDetecting]=useState(false); const detectingRef=useRef(false);
-  const [recording,setRecording]=useState(false); const [canRecord,setCanRecord]=useState(false);
+  const [recording,setRecording]=useState(false); const recordingRef=useRef(false);
+  const [canRecord,setCanRecord]=useState(false);
   const [barY,setBarY]=useState(null); const barYRef=useRef(null);
   const [sensitivity,setSensitivity]=useState(24); const sensitivityRef=useRef(24);
+  const [showPose,setShowPose]=useState(true);
   const draggingRef=useRef(false);
   const repRef=useRef({phase:'down',lastAbove:0,lastRepAt:0});
   const [rescues,setRescues]=useState([]);
@@ -36,6 +38,7 @@ export default function PullUpRescueV36(){
   // keep refs in sync
   useEffect(()=>{ useBackRef.current=useBack; },[useBack]);
   useEffect(()=>{ detectingRef.current=detecting; },[detecting]);
+  useEffect(()=>{ recordingRef.current=recording; },[recording]);
   useEffect(()=>{ barYRef.current=barY; },[barY]);
   useEffect(()=>{ sensitivityRef.current=sensitivity; },[sensitivity]);
 
@@ -49,17 +52,19 @@ export default function PullUpRescueV36(){
   function flipCamera(){ setUseBack(v=>!v); useBackRef.current=!useBackRef.current; setCamReady(false); if(streamRef.current){ streamRef.current.getTracks().forEach(t=>t.stop()); } setMsg('Tap Enable Camera after flipping'); }
 
   const tick = async ()=>{ const video=videoRef.current, base=baseRef.current, ui=uiRef.current; if(!video||!base||!ui) return; const b=base.getContext('2d'); const u=ui.getContext('2d'); const W=base.width,H=base.height; const vw=video.videoWidth||1280, vh=video.videoHeight||720; const s=Math.max(W/vw,H/vh); const dw=vw*s, dh=vh*s; const dx=(W-dw)/2, dy=(H-dh)/2; b.clearRect(0,0,W,H); if(!useBackRef.current){ b.save(); b.translate(W,0); b.scale(-1,1); b.drawImage(video, -dx - dw + W, dy, dw, dh); b.restore(); } else { b.drawImage(video, dx, dy, dw, dh); }
-    if(detectingRef.current && detectorRef.current){ const poses=await detectorRef.current.estimatePoses(video,{maxPoses:1,flipHorizontal:!useBackRef.current}); if(poses[0]){ const kps=poses[0].keypoints.map(k=>({...k})); drawPose(b,kps); const nose=kps[0]; const by=barYRef.current; const sens=sensitivityRef.current; if(nose?.score>0.4 && by!==null){ const thr=by - sens; const now=performance.now(); const above=nose.y<=thr; const {next,counted}=updateRepState(repRef.current,above,now); repRef.current=next; if(counted){ setCats(c=>c+1); spawnRescue(); } } } }
-    u.clearRect(0,0,W,H); drawHouse(u,W,H,cats); drawBars(u,W,H,barYRef.current,sensitivityRef.current); drawRescues(u,rescues); rafRef.current=requestAnimationFrame(tick); };
+    if(detectingRef.current && detectorRef.current){ const poses=await detectorRef.current.estimatePoses(video,{maxPoses:1,flipHorizontal:!useBackRef.current}); if(poses[0]){ const kps=poses[0].keypoints.map(k=>({...k})); if(showPose){ b.save(); b.globalAlpha=0.6; drawPose(b,kps); b.restore(); }
+        const nose=kps[0]; const by=barYRef.current; const sens=sensitivityRef.current; if(nose?.score>0.4 && by!==null){ const thr=by - sens; const now=performance.now(); const above=nose.y<=thr; const {next,counted}=updateRepState(repRef.current,above,now); repRef.current=next; if(counted){ setReps(x=>x+1); pulseCount(); } } } }
+    u.clearRect(0,0,W,H); drawBars(u,W,H,barYRef.current,sensitivityRef.current); drawCounter(u,W,H,reps); rafRef.current=requestAnimationFrame(tick); };
 
-  function drawPose(ctx,kps){ ctx.strokeStyle='rgba(255,255,255,.4)'; ctx.lineWidth=2; Object.values(MOVENET_EDGES).forEach(([i,j])=>{ const a=kps[i],b=kps[j]; if(a?.score>0.3&&b?.score>0.3){ ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); } }); kps.forEach(k=>{ if(k.score>0.3){ ctx.beginPath(); ctx.arc(k.x,k.y,4,0,Math.PI*2); ctx.fillStyle='#fff'; ctx.fill(); } }); }
-  function drawHouse(ctx,W,H,cats){ const p=window.devicePixelRatio||1; const w=Math.min(200*p, W*.22), h=w*.75; const x=16*p, y=H-h-16*p; ctx.fillStyle='rgba(0,0,0,.35)'; ctx.fillRect(x,y,w,h); ctx.beginPath(); ctx.moveTo(x-10,y); ctx.lineTo(x+w/2,y-40); ctx.lineTo(x+w+10,y); ctx.closePath(); ctx.fillStyle='rgba(0,0,0,.45)'; ctx.fill(); ctx.font=`${20*p}px system-ui`; ctx.fillStyle='#fff'; ctx.fillText(`${cats} saved`, x, y-12); }
-  function drawBars(ctx,W,H,barY,sensitivity){ if(barY==null) return; const p=window.devicePixelRatio||1; const bar=barY; const thr=barY - sensitivity; ctx.save(); // BAR (solid white with shadow)
-    ctx.lineWidth=6*p; ctx.strokeStyle='rgba(0,0,0,0.75)'; ctx.beginPath(); ctx.moveTo(0,bar); ctx.lineTo(W,bar); ctx.stroke(); ctx.lineWidth=4*p; ctx.strokeStyle='#ffffff'; ctx.beginPath(); ctx.moveTo(0,bar); ctx.lineTo(W,bar); ctx.stroke(); // THRESHOLD (green dashed)
+  function drawPose(ctx,kps){ ctx.strokeStyle='rgba(255,255,255,.8)'; ctx.lineWidth=2; Object.values(MOVENET_EDGES).forEach(([i,j])=>{ const a=kps[i],b=kps[j]; if(a?.score>0.3&&b?.score>0.3){ ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); } }); kps.forEach(k=>{ if(k.score>0.3){ ctx.beginPath(); ctx.arc(k.x,k.y,4,0,Math.PI*2); ctx.fillStyle='rgba(255,255,255,.9)'; ctx.fill(); } }); }
+  function drawCounter(ctx,W,H,reps){ const p=window.devicePixelRatio||1; const pad=14*p; const boxW=120*p, boxH=56*p; const x=W - boxW - pad, y=pad; ctx.fillStyle='rgba(0,0,0,.35)'; ctx.fillRect(x,y,boxW,boxH); ctx.font=`${14*p}px system-ui`; ctx.fillStyle='#fff'; ctx.fillText('Reps', x+12*p, y+20*p); ctx.font=`${26*p}px system-ui`; ctx.fillText(`${reps}`, x+12*p, y+44*p); }
+  function drawBars(ctx,W,H,barY,sensitivity){ if(barY==null) return; const p=window.devicePixelRatio||1; const bar=barY; const thr=barY - sensitivity; ctx.save(); // BAR
+    ctx.lineWidth=6*p; ctx.strokeStyle='rgba(0,0,0,0.75)'; ctx.beginPath(); ctx.moveTo(0,bar); ctx.lineTo(W,bar); ctx.stroke(); ctx.lineWidth=4*p; ctx.strokeStyle='#ffffff'; ctx.beginPath(); ctx.moveTo(0,bar); ctx.lineTo(W,bar); ctx.stroke(); // THRESHOLD
     ctx.setLineDash([16*p, 10*p]); ctx.lineWidth=6*p; ctx.strokeStyle='rgba(0,0,0,0.55)'; ctx.beginPath(); ctx.moveTo(0,thr); ctx.lineTo(W,thr); ctx.stroke(); ctx.lineWidth=4*p; ctx.strokeStyle='#00ff88'; ctx.beginPath(); ctx.moveTo(0,thr); ctx.lineTo(W,thr); ctx.stroke(); ctx.setLineDash([]); // Handle
     ctx.beginPath(); ctx.arc(W-40*p,thr,10*p,0,Math.PI*2); ctx.fillStyle='#00ff88'; ctx.shadowColor='rgba(0,0,0,.6)'; ctx.shadowBlur=6*p; ctx.fill(); ctx.restore(); }
-  function drawRescues(ctx,items){ const p=window.devicePixelRatio||1; items.forEach(r=>{ ctx.font=`${48*p}px system-ui`; ctx.textAlign='center'; ctx.fillText('🐱', r.x, r.y); }); }
-  function spawnRescue(){ const p=window.devicePixelRatio||1; const W=uiRef.current.width,H=uiRef.current.height; const sx=60*p, sy=H-120*p; const id=Math.random().toString(36).slice(2); const created={id,x:sx,y:sy}; setRescues(a=>[...a,created]); const t0=performance.now(), dur=900; const step=(t)=>{ const p2=Math.min(1,(t-t0)/dur); const nx=sx+(W*.35)*p2, ny=sy-(H*.35)*p2; setRescues(a=>a.map(r=>r.id===id?{...r,x:nx,y:ny}:r)); if(p2<1) requestAnimationFrame(step); else setTimeout(()=> setRescues(a=>a.filter(r=>r.id!==id)),150); }; requestAnimationFrame(step); }
+
+  // fun pulse for counter (optional)
+  function pulseCount(){ const u=uiRef.current; if(!u) return; const ctx=u.getContext('2d'); const W=u.width, H=u.height; const start=performance.now(), dur=250; const step=(t)=>{ const p=Math.min(1,(t-start)/dur); const s=1+0.2*(1-p); ctx.save(); ctx.translate(W-120*(window.devicePixelRatio||1), 0); ctx.scale(s,s); ctx.restore(); if(p<1) requestAnimationFrame(step); }; requestAnimationFrame(step); }
 
   // Dragging (pointer + touch) with preventDefault
   function onPointerDown(e){ const y=getY(e); if(y==null) return; setBarY(y); barYRef.current=y; draggingRef.current=true; }
@@ -70,12 +75,21 @@ export default function PullUpRescueV36(){
   function onTouchEnd(e){ e.preventDefault(); onPointerUp(); }
   function getY(e){ const rect=uiRef.current.getBoundingClientRect(); const dpr=uiRef.current.width/rect.width; if(e.touches&&e.touches[0]) return (e.touches[0].clientY-rect.top)*dpr; if(typeof e.clientY==='number') return (e.clientY-rect.top)*dpr; return null; }
 
-  // Recording
+  // Recording — FIX: set recording=true BEFORE compose loop
   const mediaRecorderRef=useRef(null); const recordedChunksRef=useRef([]);
-  function getBestMime(){ const opts=['video/mp4','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']; for(const o of opts){ try{ if(window.MediaRecorder && MediaRecorder.isTypeSupported(o)) return o; }catch{} } return ''; }
-  function startRecording(){ if(!canRecord) return; const rec=recRef.current, base=baseRef.current, ui=uiRef.current; if(!rec||!base||!ui) return; const r=rec.getContext('2d'); const mime=getBestMime(); if(!mime){ setMsg('Recording not supported on this device/browser'); return;} recordedChunksRef.current=[]; // ensure size
-    const compose=()=>{ if(!recording) return; r.clearRect(0,0,rec.width,rec.height); r.drawImage(base,0,0); r.drawImage(ui,0,0); requestAnimationFrame(compose); }; compose(); const stream=rec.captureStream(30); const mr=new MediaRecorder(stream,{mimeType:mime}); mr.ondataavailable=(e)=>{ if(e.data && e.data.size>0) recordedChunksRef.current.push(e.data); }; mr.onstop=()=>{ const type=mr.mimeType||mime; const blob=new Blob(recordedChunksRef.current,{type}); if(!blob || blob.size===0){ setMsg('Recorded file is empty (codec unsupported by Safari).'); return; } const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; const ts=new Date().toISOString().replace(/[:.]/g,'-'); a.download=`pullup-rescue-${ts}.${type.includes('mp4')?'mp4':'webm'}`; a.click(); setMsg('Recording saved'); }; mediaRecorderRef.current=mr; setRecording(true); mr.start(1000); }
-  function stopRecording(){ if(mediaRecorderRef.current && mediaRecorderRef.current.state!=='inactive') mediaRecorderRef.current.stop(); setRecording(false); }
+  function getBestMime(){ const opts=['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm','video/mp4']; for(const o of opts){ try{ if(window.MediaRecorder && MediaRecorder.isTypeSupported(o)) return o; }catch{} } return ''; }
+  function startRecording(){ if(!canRecord) return; const rec=recRef.current, base=baseRef.current, ui=uiRef.current; if(!rec||!base||!ui) return; const r=rec.getContext('2d');
+    // ensure sizes are in sync
+    rec.width = base.width; rec.height = base.height;
+    const mime=getBestMime(); if(!mime){ setMsg('Recording not supported on this device/browser'); return; }
+    recordedChunksRef.current=[]; setRecording(true); recordingRef.current=true; // <-- set BEFORE composing
+    const compose=()=>{ if(!recordingRef.current) return; r.clearRect(0,0,rec.width,rec.height); r.drawImage(base,0,0); r.drawImage(ui,0,0); requestAnimationFrame(compose); }; requestAnimationFrame(compose);
+    const stream=rec.captureStream(30); const mr=new MediaRecorder(stream,{mimeType:mime});
+    mr.ondataavailable=(e)=>{ if(e.data && e.data.size>0) recordedChunksRef.current.push(e.data); };
+    mr.onstop=()=>{ const chunks=recordedChunksRef.current; const type=mr.mimeType||mime; const blob=new Blob(chunks,{type}); if(!blob || blob.size<20000){ setMsg('Recording created but file is tiny/empty — Safari codec issue. Try another browser.'); return; } const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; const ts=new Date().toISOString().replace(/[:.]/g,'-'); a.download=`pullup-rescue-${ts}.${type.includes('webm')?'webm':'mp4'}`; a.click(); setMsg('Recording saved'); };
+    mediaRecorderRef.current=mr; try{ mr.start(1000); }catch{ mr.start(); }
+  }
+  function stopRecording(){ if(mediaRecorderRef.current && mediaRecorderRef.current.state!=='inactive') mediaRecorderRef.current.stop(); setRecording(false); recordingRef.current=false; }
 
   return (
     <div style={{position:'fixed',inset:0,background:'#000',color:'#fff',overflow:'hidden'}}>
@@ -113,13 +127,16 @@ export default function PullUpRescueV36(){
           ) : (
             <button onClick={stopRecording} style={btn(1,'#ef4444')}>Stop</button>
           )}
-          <button onClick={()=>{ setCats(0); repRef.current={phase:'down',lastAbove:0,lastRepAt:0}; }} style={btn()}>Reset</button>
+          <button onClick={()=>{ setReps(0); repRef.current={phase:'down',lastAbove:0,lastRepAt:0}; }} style={btn()}>Reset</button>
           <button onClick={()=> { if(uiRef.current){ const mid=Math.floor(uiRef.current.height*0.5); setBarY(mid); barYRef.current=mid; } }} style={btn()}>Center bar</button>
         </div>
-        <div style={{display:'grid',gap:6}}>
+        <div style={{display:'grid',gridTemplateColumns:'1fr auto',alignItems:'center',gap:8}}>
           <Labeled label={`Sensitivity (px above bar): ${sensitivity}`}>
             <input type="range" min={8} max={80} step={1} value={sensitivity} onChange={(e)=>{ const v=parseInt(e.target.value,10); setSensitivity(v); sensitivityRef.current=v; }} style={{width:'100%'}} />
           </Labeled>
+          <label style={{display:'flex',gap:6,alignItems:'center',fontSize:12,opacity:.85}}>
+            <input type="checkbox" checked={showPose} onChange={(e)=>setShowPose(e.target.checked)} /> Show pose
+          </label>
         </div>
         <div style={{fontSize:12,opacity:.85,textAlign:'center'}}>{msg}</div>
         {debug && (<div style={{fontSize:10,opacity:.6,textAlign:'center',userSelect:'all'}}>{debug}</div>)}
