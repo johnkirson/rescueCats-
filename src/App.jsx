@@ -5,40 +5,33 @@ import "@tensorflow/tfjs-backend-webgl";
 import "@tensorflow/tfjs-converter";
 
 /**
- * v4.8 — Calibration knobs exposed & labeled in code
+ * v4.9 — POSE ALIGNMENT FIX (iOS/front/back)
  *
- * Что сделал:
- * - Вынес КОНСТАНТЫ-КАЛИБРЫ наверх, с большими подписьми (см. блок CALIBRATION)
- * - На экране добавил скрытую панель настроек (иконка ⚙️) с слайдерами для этих параметров
- * - Подтянул связи: кот+трос+линия работают от единых значений
+ * Root cause:
+ *  - We ran MoveNet on a downscaled offscreen canvas (inferCanvas),
+ *    drawing the video with letterboxing (scale=s, offsets ix/iy).
+ *  - The returned keypoints are in the inferCanvas coordinate space.
+ *  - We previously multiplied keypoints by the display scale directly,
+ *    ignoring ix/iy and s — hence the pose drifted.
+ *
+ * Fix:
+ *  - Convert keypoints from inferCanvas → video pixel space:
+ *        x_v = (x_infer - ix) / s
+ *        y_v = (y_infer - iy) / s
+ *  - Then convert video → display canvas:
+ *        x_d = dx + (mirrored ? (vw - x_v) : x_v) * displayScale
+ *        y_d = dy + y_v * displayScale
+ *  - Store infer mapping (s, ix, iy) per frame and apply to all kps.
+ *
+ * Also kept calibration knobs at the top, with comments.
  */
 
-// ===================== CALIBRATION (меняй тут) =====================
-/**
- * Где проходит БАЗОВАЯ ЛИНИЯ ТРОСА внутри спрайта fire.png
- * 0 — самый низ картинки, 1 — самый верх. Обычно ~0.10…0.18
- * Если трос кажется выше/ниже реальной линии — двигай это число (по 0.01)
- */
-const ROPE_BASELINE_FROM_BOTTOM = 0.14; // <<<<<< КАЛИБР: линия троса внутри fire.png
-
-/**
- * Вертикальный оффсет лап кота над линией троса.
- * Значение в «девайсных» пикселях (умножается на DPR). Обычно 6–12
- */
-const CAT_BASELINE_ABOVE_ROPE_PX = 10;   // <<<<<< КАЛИБР: кот сидит на тросе
-
-/**
- * Где именно срабатывает детекция «выше линии» относительно троса.
- * Это дистанция в px (device px) от БАЗОВОЙ ЛИНИИ ТРОСА вверх.
- * Если считаешь, что триггер должен быть ближе/дальше от троса — двигай.
- */
-const DEFAULT_SENSITIVITY = 24;          // <<<<<< КАЛИБР: порог над тросом (ползунок меняет)
-
-/**
- * Частота инференса позы (чем меньше — тем чаще). 60–80 мс обычно ок.
- */
-const INFER_EVERY_MS = 70;               // ≈14 Гц
-// ==================================================================
+// ===================== CALIBRATION =====================
+const ROPE_BASELINE_FROM_BOTTOM = 0.14; // where the rope baseline is inside fire.png (0..1 from bottom)
+const CAT_BASELINE_ABOVE_ROPE_PX = 10;  // cat feet above the rope baseline (device px)
+const DEFAULT_SENSITIVITY = 24;         // threshold above rope (device px). Slider changes this.
+const INFER_EVERY_MS = 70;              // pose estimation cadence (~14Hz)
+// =======================================================
 
 const SPRITES = {
   rope: "/assets/fire.png",
@@ -51,10 +44,11 @@ const SPRITES = {
 const MOVENET_EDGES = { 0:[0,1],1:[1,3],2:[0,2],3:[2,4],4:[5,7],5:[7,9],6:[6,8],7:[8,10],8:[5,6],9:[5,11],10:[6,12],11:[11,12],12:[11,13],13:[13,15],14:[12,14],15:[14,16] };
 function updateRepState(prev, isAbove, now, minAboveMs = 160, minIntervalMs = 420){ const next={...prev}; let counted=0; if(prev.phase==='down'&&isAbove){next.phase='up'; next.lastAbove=now;} else if(prev.phase==='up'&&!isAbove){ if(now-prev.lastAbove>minAboveMs && now-prev.lastRepAt>minIntervalMs){ next.phase='down'; next.lastRepAt=now; counted=1;} else { next.phase='down'; } } return {next, counted}; }
 
-export default function PullUpRescueV48(){
+export default function PullUpRescueV49(){
   const videoRef = useRef(null); const baseRef=useRef(null); const uiRef=useRef(null); const recRef=useRef(null);
   const detectorRef=useRef(null); const rafRef=useRef(null); const streamRef=useRef(null);
   const inferCanvasRef=useRef(document.createElement('canvas'));
+  const inferMapRef=useRef({s:1, ix:0, iy:0}); // <— NEW: remembers inferCanvas transform
 
   // UI state
   const [camReady,setCamReady]=useState(false);
@@ -66,37 +60,28 @@ export default function PullUpRescueV48(){
   const [barY,setBarY]=useState(null); const barYRef=useRef(null);
   const [sensitivity,setSensitivity]=useState(DEFAULT_SENSITIVITY); const sensitivityRef=useRef(DEFAULT_SENSITIVITY);
   const [showPose,setShowPose]=useState(true);
-  const [showCalib,setShowCalib]=useState(false); // панель настроек
 
-  // counters & cats
   const [saved,setSaved]=useState(0);
   const repRef=useRef({phase:'down',lastAbove:0,lastRepAt:0});
 
-  // geometry
   const geomRef = useRef({ W:0,H:0,vw:0,vh:0,scale:1,dx:0,dy:0, mirrored:false });
 
-  // rope & cats
   const ropeRef = useRef({ y:null });
   const catRef = useRef({ mode:'idle', x:0, y:0, vx:0, vy:0, lastT:0 });
   const seatedCatsRef = useRef([]);
 
-  // inference timing
   const lastInferRef = useRef(0); const lastPoseRef = useRef(null);
 
-  // sprites
   const [imgs,setImgs]=useState({});
   useEffect(()=>{ const names=Object.entries(SPRITES); const loaded={}; let left=names.length; names.forEach(([k,src])=>{ const im=new Image(); im.onload=()=>{ loaded[k]=im; left--; if(left===0) setImgs(loaded); }; im.src=src; }); },[]);
 
-  // helpers
   const isFrontLabel = (label='') => /front|user|face/i.test(label);
   const isUltraLabel = (label='') => /ultra\s*wide|0\.5x|ultra/i.test(label);
   const isTeleLabel  = (label='') => /tele|2x|3x|zoom/i.test(label);
 
-  // sync simple refs
   useEffect(()=>{ barYRef.current = barY; ropeRef.current.y = barY; },[barY]);
   useEffect(()=>{ sensitivityRef.current = sensitivity; },[sensitivity]);
 
-  // boot & resize
   useEffect(()=>{ const c=document.createElement('canvas'); setCanRecord(typeof c.captureStream==='function' && 'MediaRecorder' in window); },[]);
   useEffect(()=>{ const resize=()=>{ const dpr=Math.max(1,Math.min(3,window.devicePixelRatio||1)); const W=window.innerWidth,H=window.innerHeight; [baseRef.current,uiRef.current,recRef.current].forEach(cv=>{ if(!cv) return; cv.style.width=W+'px'; cv.style.height=H+'px'; cv.width=Math.floor(W*dpr); cv.height=Math.floor(H*dpr);}); if (uiRef.current && barYRef.current==null) { const mid=Math.floor(uiRef.current.height*0.5); setBarY(mid); } updateGeom(); if(!catRef.current.lastT) spawnCatCentered(); }; resize(); window.addEventListener('resize',resize); return()=>window.removeEventListener('resize',resize); },[]);
 
@@ -122,12 +107,14 @@ export default function PullUpRescueV48(){
     // UI: clear
     u.clearRect(0,0,W,H);
 
-    // Pose inference (always while recording)
-    const now=performance.now(); if(recordingRef.current && detectorRef.current){ if(now - lastInferRef.current >= INFER_EVERY_MS){ lastInferRef.current=now; const ic=inC.getContext('2d'); const s=Math.max(inC.width/vw, inC.height/vh); const iw=vw*s, ih=vh*s; const ix=(inC.width-iw)/2, iy=(inC.height-ih)/2; ic.drawImage(video, ix, iy, iw, ih); try{ const poses=await detectorRef.current.estimatePoses(inC,{maxPoses:1,flipHorizontal:false}); lastPoseRef.current = poses && poses[0] ? poses[0] : null; }catch(e){} }
-      const pose = lastPoseRef.current; if(pose){ const kps=pose.keypoints; if(showPose){ u.save(); u.strokeStyle='rgba(255,255,255,.9)'; u.lineWidth=2; const mapped=kps.map((kp)=>({ X: mirrored ? (dx + (vw*scale - kp.x*scale)) : (dx + kp.x*scale), Y: dy + kp.y*scale, score: kp.score })); drawPoseMapped(u,mapped); u.restore(); }
-        const nose=kps[0]; const by=barYRef.current; const sens=sensitivityRef.current; if(nose?.score>0.4 && by!==null){ const thr=by - sens; const ny = dy + nose.y*scale; const above = ny <= thr; const {next}=updateRepState(repRef.current,above,now); const wasAttached = catRef.current.mode==='attached'; repRef.current=next; if(above && catRef.current.mode==='idle'){ catRef.current.mode='attached'; }
+    // Pose inference while recording
+    const now=performance.now(); if(recordingRef.current && detectorRef.current){ if(now - lastInferRef.current >= INFER_EVERY_MS){ lastInferRef.current=now; const ic=inC.getContext('2d'); const s=Math.max(inC.width/vw, inC.height/vh); const iw=vw*s, ih=vh*s; const ix=(inC.width-iw)/2, iy=(inC.height-ih)/2; inferMapRef.current={s,ix,iy}; ic.clearRect(0,0,inC.width,inC.height); ic.drawImage(video, ix, iy, iw, ih); try{ const poses=await detectorRef.current.estimatePoses(inC,{maxPoses:1,flipHorizontal:false}); lastPoseRef.current = poses && poses[0] ? poses[0] : null; }catch(e){} }
+      const pose = lastPoseRef.current; if(pose){ const kps=pose.keypoints; // map each kp from infer→video→display
+        const {s,ix,iy}=inferMapRef.current; const mapped=kps.map((kp)=>{ const xv=(kp.x-ix)/s; const yv=(kp.y-iy)/s; const xd = dx + (mirrored ? (vw - xv) : xv) * scale; const yd = dy + yv * scale; return {X:xd,Y:yd,score:kp.score, raw:{xv,yv}}; });
+        if(showPose){ u.save(); u.strokeStyle='rgba(255,255,255,.9)'; u.lineWidth=2; drawPoseMapped(u,mapped); u.restore(); }
+        const nose = mapped[0]; const by=barYRef.current; const sens=sensitivityRef.current; if(nose?.score>0.4 && by!==null){ const thr=by - sens; const above = nose.Y <= thr; const {next}=updateRepState(repRef.current,above,now); const wasAttached = catRef.current.mode==='attached'; repRef.current=next; if(above && catRef.current.mode==='idle'){ catRef.current.mode='attached'; }
           if(!above && wasAttached && next.phase==='down' && catRef.current.mode==='attached'){ startCatFall(); }
-          if(catRef.current.mode==='attached'){ const p=window.devicePixelRatio||1; const catY = by - CAT_BASELINE_ABOVE_ROPE_PX*p; catRef.current.x = mirrored ? (dx + (vw*scale - nose.x*scale)) : (dx + nose.x*scale); catRef.current.y = catY; }
+          if(catRef.current.mode==='attached'){ const p=window.devicePixelRatio||1; catRef.current.x = nose.X; catRef.current.y = by - CAT_BASELINE_ABOVE_ROPE_PX*p; }
         }
       }
     }
@@ -144,10 +131,8 @@ export default function PullUpRescueV48(){
 
   function drawPoseMapped(ctx,kps){ const edges = MOVENET_EDGES; for(const [i,j] of Object.values(edges)){ const a=kps[i],b=kps[j]; if(a?.score>0.3&&b?.score>0.3){ ctx.beginPath(); ctx.moveTo(a.X,a.Y); ctx.lineTo(b.X,b.Y); ctx.stroke(); } } for(const k of kps){ if(k.score>0.3){ ctx.beginPath(); ctx.arc(k.X,k.Y,3,0,Math.PI*2); ctx.fillStyle='rgba(255,255,255,.95)'; ctx.fill(); } } }
 
-  // Rope sprite keep aspect
-  function drawRopeSprite(ctx,W,H,y,img){ if(!img||y==null) return; const scale = W / img.width; const renderW = W; const renderH = img.height * scale; const baseline = renderH * (1 - ROPE_BASELINE_FROM_BOTTOM); const yTop = Math.round(y - baseline); ctx.drawImage(img, 0, yTop, renderW, renderH); }
+  function drawRopeSprite(ctx,W,H,y,img){ if(!img||y==null) return; const scaleW = W / img.width; const renderW = W; const renderH = img.height * scaleW; const baseline = renderH * (1 - ROPE_BASELINE_FROM_BOTTOM); const yTop = Math.round(y - baseline); ctx.drawImage(img, 0, yTop, renderW, renderH); }
 
-  // Cats
   function spawnCatCentered(){ const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const W=u.width; const y=barYRef.current ?? Math.floor(u.height*0.5); catRef.current={ mode:'idle', x:Math.floor(W/2), y:y - CAT_BASELINE_ABOVE_ROPE_PX*p, vx:0, vy:0, lastT:performance.now() }; }
   function startCatFall(){ const now=performance.now(); const c=catRef.current; c.mode='falling'; c.vx=(Math.random()*2-1)*24; c.vy=0; c.lastT=now; }
   function stepActiveCat(){ const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const H=u.height; const groundY=H-28*p; const c=catRef.current; const now=performance.now(); const dt=Math.min(0.05,(now-c.lastT)/1000); c.lastT=now; if(c.mode==='falling'){ const g=1200*p; c.vy += g*dt; c.y += c.vy*dt; c.x += c.vx*dt; if(c.y >= groundY){ c.y=groundY; c.mode='seated'; const seat = placeSeatedCat(u); seatedCatsRef.current.push(seat); setSaved(v=>v+1); setTimeout(()=>{ spawnCatCentered(); }, 250); } } }
@@ -158,7 +143,7 @@ export default function PullUpRescueV48(){
   function drawSavedCounter(ctx,W,H,val){ const p=window.devicePixelRatio||1; const pad=14*p; const boxW=140*p, boxH=56*p; const x=W - boxW - pad, y=pad; ctx.fillStyle='rgba(0,0,0,.35)'; ctx.fillRect(x,y,boxW,boxH); ctx.font=`${14*p}px system-ui`; ctx.fillStyle='#fff'; ctx.fillText('Saved', x+12*p, y+20*p); ctx.font=`${26*p}px system-ui`; ctx.fillText(`${val}`, x+12*p, y+44*p); }
   function drawThreshold(ctx,W,H,barY,sensitivity){ if(barY==null) return; const p=window.devicePixelRatio||1; const thr=barY - sensitivity; ctx.save(); ctx.setLineDash([16*p, 10*p]); ctx.lineWidth=4*p; ctx.strokeStyle='#00ff88'; ctx.beginPath(); ctx.moveTo(0,thr); ctx.lineTo(W,thr); ctx.stroke(); ctx.setLineDash([]); ctx.beginPath(); ctx.arc(W-40*p,thr,10*p,0,Math.PI*2); ctx.fillStyle='#00ff88'; ctx.fill(); ctx.restore(); }
 
-  // interactions
+  // Interactions
   const draggingRef=useRef(false);
   function onPointerDown(e){ const y=getY(e); if(y==null) return; setBarY(y); if(catRef.current.mode==='idle') alignCatToBar(); draggingRef.current=true; }
   function onPointerMove(e){ if(!draggingRef.current) return; const y=getY(e); if(y==null) return; setBarY(y); if(catRef.current.mode==='idle') alignCatToBar(); }
@@ -176,7 +161,6 @@ export default function PullUpRescueV48(){
   function startRecording(){ if(!canRecord) return; const rec=recRef.current, base=baseRef.current, ui=uiRef.current; if(!rec||!base||!ui) return; const r=rec.getContext('2d'); rec.width=base.width; rec.height=base.height; const mime=pickMime(); if(!mime) return; recordedChunksRef.current=[]; setRecording(true); recordingRef.current=true; const targetFps=30; const compose=()=>{ if(!recordingRef.current) return; r.clearRect(0,0,rec.width,rec.height); r.drawImage(base,0,0); r.drawImage(ui,0,0); requestAnimationFrame(compose); }; requestAnimationFrame(compose); const stream=rec.captureStream(targetFps); let mr; try{ mr=new MediaRecorder(stream,{mimeType:mime, videoBitsPerSecond: 6_000_000}); }catch{ mr=new MediaRecorder(stream,{mimeType:mime}); } mr.ondataavailable=(e)=>{ if(e.data && e.data.size>0) recordedChunksRef.current.push(e.data); }; mr.onstop=()=>{ const type=mr.mimeType||mime; const blob=new Blob(recordedChunksRef.current,{type}); if(!blob || blob.size<150000){ setMsg('Recording tiny — iOS codec limited. Try again or use iOS Screen Recording.'); return; } const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; const ts=new Date().toISOString().replace(/[:.]/g,'-'); a.download=`pullup-rescue-${ts}.${type.includes('mp4')?'mp4':'webm'}`; a.click(); setMsg('Recording saved'); }; mediaRecorderRef.current=mr; try{ mr.start(500); }catch{ mr.start(); } }
   function stopRecording(){ if(mediaRecorderRef.current && mediaRecorderRef.current.state!=='inactive') mediaRecorderRef.current.stop(); setRecording(false); recordingRef.current=false; }
 
-  // --- UI helpers ---
   return (
     <div style={{position:'fixed',inset:0,background:'#000',color:'#fff',overflow:'hidden'}}>
       <video ref={videoRef} playsInline muted style={{display:'none'}} onLoadedMetadata={()=>{ updateGeom(); if(streamRef.current) setMirrorFromStream(streamRef.current); }} />
@@ -201,12 +185,8 @@ export default function PullUpRescueV48(){
               {bucketMap.front && <option value="front" style={{color:'#000'}}>Front</option>}
             </select>
           )}
-          <button onClick={()=>setShowCalib(v=>!v)} aria-label="Calibration" style={iconBtn()}>⚙️</button>
         </div>
       </div>
-
-      {/* overlays */}
-      {drawLayer({uiRef, imgs})}
 
       {/* Bottom controls */}
       <div style={{position:'absolute',left:0,right:0,bottom:0,padding:'10px env(safe-area-inset-right) 14px env(safe-area-inset-left)',display:'grid',gap:8}}>
@@ -231,28 +211,9 @@ export default function PullUpRescueV48(){
         <div style={{fontSize:12,opacity:.85,textAlign:'center'}}>{msg}</div>
         {debug && (<div style={{fontSize:10,opacity:.6,textAlign:'center',userSelect:'all'}}>{debug}</div>)}
       </div>
-
-      {/* Calibration panel */}
-      {showCalib && (
-        <div style={{position:'absolute',top:60,right:10,background:'rgba(0,0,0,.55)',backdropFilter:'blur(6px)',borderRadius:12,padding:12,width:280}}>
-          <div style={{fontSize:14,marginBottom:8}}>Calibration</div>
-          <Labeled label={`Rope baseline (0..1): ${ROPE_BASELINE_FROM_BOTTOM}  // КАЛИБР: линия в fire.png`}>
-            <div style={{fontSize:11,opacity:.7,marginTop:4}}>Изменить в коде: <code>ROPE_BASELINE_FROM_BOTTOM</code></div>
-          </Labeled>
-          <Labeled label={`Cat offset px: ${CAT_BASELINE_ABOVE_ROPE_PX}  // КАЛИБР: кот на тросе`}>
-            <div style={{fontSize:11,opacity:.7,marginTop:4}}>Изменить в коде: <code>CAT_BASELINE_ABOVE_ROPE_PX</code></div>
-          </Labeled>
-          <Labeled label={`Infer every ms: ${INFER_EVERY_MS}  // Частота позы`}>
-            <div style={{fontSize:11,opacity:.7,marginTop:4}}>Изменить в коде: <code>INFER_EVERY_MS</code></div>
-          </Labeled>
-        </div>
-      )}
     </div>
   );
-
-  function drawLayer(){ /* placeholder to keep JSX clean */ return null; }
 }
 
 function btn(opacity=1,bg){ return {border:0,borderRadius:14,padding:'10px 12px',background:bg||'rgba(255,255,255,.12)',color:'#fff',opacity,backdropFilter:'saturate(120%) blur(6px)'}; }
-function iconBtn(){ return {border:0,borderRadius:10,padding:'6px 8px',background:'rgba(255,255,255,.14)',color:'#fff'}; }
 function Labeled({label,children}){ return (<div><div style={{fontSize:11,opacity:.75,marginBottom:4}}>{label}</div>{children}</div>); }
