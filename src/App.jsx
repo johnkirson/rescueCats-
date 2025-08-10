@@ -121,6 +121,22 @@ export default function PullUpRescueV63(){
     entries.forEach(([k,src])=>{ const im=new Image(); im.onload=()=>{ loaded[k]=im; left--; if(left===0) setImgs(loaded); }; im.src=src; });
   },[]);
 
+  // ===== Auto-start camera when sprites are loaded =====
+  useEffect(() => {
+    if (Object.keys(imgs).length > 0 && !camReady) {
+      // Auto-start camera after sprites are loaded
+      setTimeout(() => {
+        enableCamera();
+      }, 100);
+    }
+  }, [imgs, camReady]);
+
+  // ===== Auto-start RAF for UI rendering =====
+  useEffect(() => {
+    // Start RAF immediately to show UI
+    restartRAF();
+  }, []);
+
   // ===== Helpers for labels =====
   const isFrontLabel=(label='')=>/front|user|face/i.test(label);
   const isUltraLabel=(label='')=>/ultra\s*wide|0\.5x|ultra/i.test(label);
@@ -176,13 +192,17 @@ export default function PullUpRescueV63(){
         barYRef.current = mid;
       }
       updateGeom(); 
-      // Spawn cat if it doesn't exist and camera is ready and sprites are loaded
-      if(!catRef.current.lastT && camReady && Object.keys(imgs).length > 0) {
+      // Spawn cat if it doesn't exist and sprites are loaded
+      if(!catRef.current.lastT && Object.keys(imgs).length > 0) {
         try {
           spawnCatCentered();
         } catch(e) {
           console.error('Spawn cat in resize failed:', e);
         }
+      }
+      // Ensure RAF is running
+      if (!rafRef.current) {
+        restartRAF();
       }
     };
     resize(); 
@@ -541,9 +561,7 @@ export default function PullUpRescueV63(){
 
   // ===== RAF watchdog =====
   function restartRAF(){ 
-    // Only restart RAF if camera is ready
-    if (!camReady) return;
-    
+    // Allow starting RAF even without camera to show UI
     try {
       cancelAnimationFrame(rafRef.current||0); 
       rafRef.current = requestAnimationFrame(tick); 
@@ -649,8 +667,8 @@ export default function PullUpRescueV63(){
       }
 
       // overlays
-      // Only draw game elements when camera is ready and sprites are loaded
-      if(camReady && Object.keys(imgs).length > 0) {
+      // Draw game elements when sprites are loaded (even without camera)
+      if(Object.keys(imgs).length > 0) {
         // Only draw rope and threshold if barY and sensitivity are set
         if (barYRef.current !== null && sensitivityRef.current !== null) {
           try {
@@ -668,8 +686,8 @@ export default function PullUpRescueV63(){
           console.warn('Failed to draw cats:', e);
         }
         
-        // Ensure cat exists if camera is ready and sprites are loaded
-        if (!catRef.current.lastT) {
+        // Ensure cat exists if sprites are loaded and barY is set
+        if (!catRef.current.lastT && barYRef.current !== null) {
           try {
             spawnCatCentered();
           } catch(e) {
@@ -744,8 +762,8 @@ export default function PullUpRescueV63(){
 
   function spawnCatCentered(){
     try {
-      // Don't spawn cat if camera is not ready
-      if (!camReady) return;
+      // Allow spawning if sprites are loaded and barY is set
+      if (Object.keys(imgs).length === 0) return;
       
       const u=uiRef.current; 
       if(!u) return; 
@@ -757,8 +775,8 @@ export default function PullUpRescueV63(){
       // Don't spawn cat if barY is not set
       if (y === null) return;
       
-      // Don't spawn if cat already exists
-      if (catRef.current && catRef.current.lastT) return;
+      // Allow spawning if cat doesn't exist OR if cat is in 'seated' mode (ready for next)
+      if (catRef.current && catRef.current.lastT && catRef.current.mode !== 'seated') return;
       
       catRef.current={ 
         mode:'idle', 
@@ -825,9 +843,23 @@ export default function PullUpRescueV63(){
           savedRef.current = savedRef.current + 1; 
           setSaved(v=>v+1); 
           triggerMilestones(savedRef.current);
+          
+          // Reset cat state to allow spawning new cat
+          c.lastT = 0;
+          c.mode = 'idle';
+          c.x = 0;
+          c.y = 0;
+          c.vx = 0;
+          c.vy = 0;
+          c.attachDy = 0;
+          c.belowStart = 0;
+          c.maxDepthBelow = 0;
+          c.landUntil = 0;
+          
+          // Spawn new cat after a short delay
           setTimeout(()=>{ 
             try {
-              if (camReady && Object.keys(imgs).length > 0) {
+              if (Object.keys(imgs).length > 0) {
                 spawnCatCentered(); 
               }
             } catch(e) {
