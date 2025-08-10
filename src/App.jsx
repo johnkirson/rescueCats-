@@ -4,6 +4,9 @@ import * as tf from "@tensorflow/tfjs-core";
 import "@tensorflow/tfjs-backend-webgl";
 import "@tensorflow/tfjs-converter";
 
+// Register TensorFlow.js backend
+tf.setBackend('webgl');
+
 /**
  * v6.3 — Complete, de-frozen build (previous working)
  * --------------------------------------------------
@@ -100,7 +103,8 @@ export default function PullUpRescueV63(){
   const [sensitivity,setSensitivity]=useState(DEFAULT_SENSITIVITY); const sensitivityRef=useRef(DEFAULT_SENSITIVITY);
   const [showPose,setShowPose]=useState(true);
 
-  const [saved,setSaved]=useState(0); const savedRef=useRef(0); useEffect(()=>{ savedRef.current=saved; },[saved]);
+  const [saved,setSaved]=useState(0); const savedRef=useRef(0); 
+  useEffect(()=>{ savedRef.current=saved; },[saved]);
   const repRef=useRef({phase:'down',lastAbove:0,lastRepAt:0});
   const geomRef=useRef({ W:0,H:0,vw:0,vh:0,scale:1,dx:0,dy:0, mirrored:false });
 
@@ -126,7 +130,34 @@ export default function PullUpRescueV63(){
   useEffect(()=>{ sensitivityRef.current=sensitivity; },[sensitivity]);
 
   // ===== Recording capability detection =====
-  useEffect(()=>{ const c=document.createElement('canvas'); setCanRecord(typeof c.captureStream==='function' && 'MediaRecorder' in window); },[]);
+  useEffect(()=>{ 
+    const c=document.createElement('canvas'); 
+    setCanRecord(typeof c.captureStream==='function' && 'MediaRecorder' in window); 
+  },[]);
+
+  // ===== Cleanup on unmount =====
+  useEffect(() => {
+    return () => {
+      // Clean up camera stream
+      if(streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop());
+      }
+      
+      // Clean up RAF
+      if(rafRef.current) {
+        cancelAnimationFrame(rafRef.current);
+      }
+      
+      // Clean up media recorder
+      if(mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        try {
+          mediaRecorderRef.current.stop();
+        } catch(e) {
+          console.warn('Error stopping recorder on cleanup:', e);
+        }
+      }
+    };
+  }, []);
 
   // ===== Resize handling =====
   useEffect(()=>{
@@ -141,22 +172,51 @@ export default function PullUpRescueV63(){
       }
       updateGeom(); if(!catRef.current.lastT) spawnCatCentered();
     };
-    resize(); window.addEventListener('resize',resize);
+    resize(); 
+    window.addEventListener('resize',resize);
     return()=>window.removeEventListener('resize',resize);
   },[]);
 
   function updateGeom(){
-    const video=videoRef.current, base=baseRef.current; if(!video||!base) return;
-    const W=base.width,H=base.height; const vw=video.videoWidth||1280, vh=video.videoHeight||720;
-    const scale=Math.max(W/vw,H/vh); const dw=vw*scale, dh=vh*scale; const dx=(W-dw)/2, dy=(H-dh)/2;
+    const video=videoRef.current, base=baseRef.current; 
+    if(!video||!base) return;
+    
+    const W=base.width,H=base.height; 
+    const vw=video.videoWidth||1280, vh=video.videoHeight||720;
+    
+    if(vw <= 0 || vh <= 0) {
+      console.warn('Invalid video dimensions:', {vw, vh});
+      return;
+    }
+    
+    const scale=Math.max(W/vw,H/vh); 
+    const dw=vw*scale, dh=vh*scale; 
+    const dx=(W-dw)/2, dy=(H-dh)/2;
+    
     geomRef.current={...geomRef.current, W,H,vw,vh,scale,dx,dy};
-    const inW=320; const inH=Math.round(inW*vh/vw)||240; const c=inferCanvasRef.current; c.width=inW; c.height=inH;
+    
+    const inW=320; 
+    const inH=Math.round(inW*vh/vw)||240; 
+    const c=inferCanvasRef.current; 
+    if(c) {
+      c.width=inW; 
+      c.height=inH;
+    }
   }
   function setMirrorFromStream(stream){
-    try{ const track=stream.getVideoTracks?.()[0]; const s=track?.getSettings?.()||{}; const label=track?.label||'';
+    try{ 
+      const track=stream.getVideoTracks?.()[0]; 
+      if(!track) return;
+      
+      const s=track?.getSettings?.()||{}; 
+      const label=track?.label||'';
       const mirrored = s.facingMode ? /user|front/i.test(s.facingMode) : isFrontLabel(label);
       geomRef.current={...geomRef.current, mirrored};
-    }catch{}
+    }catch(e){
+      console.warn('Failed to detect mirror setting:', e);
+      // Default to not mirrored
+      geomRef.current={...geomRef.current, mirrored: false};
+    }
   }
 
   // ===== Detector =====
@@ -185,12 +245,18 @@ export default function PullUpRescueV63(){
       const pre=await navigator.mediaDevices.getUserMedia({video:true,audio:false});
       const devices=await navigator.mediaDevices.enumerateDevices();
       pre.getTracks().forEach(t=>t.stop());
-      const buckets=toBuckets(devices); setBucketMap(buckets); bucketMapRef.current=buckets;
+      const buckets=toBuckets(devices); 
+      setBucketMap(buckets); 
+      bucketMapRef.current=buckets;
       const preferred=buckets.ultra?'ultra':(buckets.wide?'wide':'front');
       await switchToBucket(preferred, buckets);
       setCamReady(true);
       restartRAF();
-    }catch(e){ console.error(e); setMsg('Camera init failed.'); setDebug(`${e.name||'Error'}: ${e.message||e}`); }
+    }catch(e){ 
+      console.error('Camera initialization failed:', e); 
+      setMsg('Camera init failed.'); 
+      setDebug(`${e.name||'Error'}: ${e.message||e}`); 
+    }
   }
 
   async function switchToBucket(bucket, mapOverride){
@@ -199,16 +265,57 @@ export default function PullUpRescueV63(){
       const deviceId=map[bucket];
       const baseConstraints={ width:{ideal:1920}, height:{ideal:1080}, frameRate:{ideal:30, max:60} };
       let stream;
-      if(deviceId){ try{ stream=await navigator.mediaDevices.getUserMedia({ video:{ deviceId:{ exact: deviceId }, ...baseConstraints }, audio:false }); }catch(e){ setDebug(`Exact ${bucket} failed: ${e.name}`); } }
-      if(!stream){ try{ stream=await navigator.mediaDevices.getUserMedia({ video: baseConstraints, audio:false }); }catch{ stream=await navigator.mediaDevices.getUserMedia({ video:true, audio:false }); } }
-      if(streamRef.current) streamRef.current.getTracks().forEach(t=>t.stop());
-      const v=videoRef.current; v.srcObject=stream; try{ await v.play(); }catch{}
-      streamRef.current=stream; setMirrorFromStream(stream); updateGeom();
+      
+      if(deviceId){ 
+        try{ 
+          stream=await navigator.mediaDevices.getUserMedia({ 
+            video:{ deviceId:{ exact: deviceId }, ...baseConstraints }, 
+            audio:false 
+          }); 
+        }catch(e){ 
+          setDebug(`Exact ${bucket} failed: ${e.name}`); 
+        } 
+      }
+      
+      if(!stream){ 
+        try{ 
+          stream=await navigator.mediaDevices.getUserMedia({ video: baseConstraints, audio:false }); 
+        }catch(e){ 
+          try {
+            stream=await navigator.mediaDevices.getUserMedia({ video:true, audio:false }); 
+          } catch(e2) {
+            throw new Error(`Failed to get camera stream: ${e2.message}`);
+          }
+        } 
+      }
+      
+      if(streamRef.current) {
+        streamRef.current.getTracks().forEach(t=>t.stop());
+      }
+      
+      const v=videoRef.current; 
+      if(!v) throw new Error('Video element not found');
+      
+      v.srcObject=stream; 
+      try{ 
+        await v.play(); 
+      }catch(e){
+        console.warn('Video play failed:', e);
+      }
+      
+      streamRef.current=stream; 
+      setMirrorFromStream(stream); 
+      updateGeom();
+      
       const label = stream.getVideoTracks?.()[0]?.label || '';
       const finalBucket = /front|user|face/i.test(label) ? 'front' : (/ultra\s*wide|0\.5x|ultra/i.test(label) ? 'ultra' : 'wide');
       setBucketChoice(finalBucket);
       return finalBucket;
-    }catch(e){ setDebug(`Switch failed: ${e.name}`); return bucket; }
+    }catch(e){ 
+      console.error('Camera switch failed:', e);
+      setDebug(`Switch failed: ${e.name || 'Unknown error'}`); 
+      return bucket; 
+    }
   }
 
   // ===== Milestones state/engine =====
@@ -220,84 +327,173 @@ export default function PullUpRescueV63(){
     seatedStyle: { mode: "default", until:0 },
   });
   function triggerMilestones(score){
-    for(const rule of MILESTONES){
-      if(score>=rule.at && !firedMilestonesRef.current.has(rule.at)){
-        firedMilestonesRef.current.add(rule.at);
-        runMilestone(rule);
+    try {
+      for(const rule of MILESTONES){
+        if(score>=rule.at && !firedMilestonesRef.current.has(rule.at)){
+          firedMilestonesRef.current.add(rule.at);
+          runMilestone(rule);
+        }
       }
+    } catch(e) {
+      console.error('Trigger milestones failed:', e);
     }
   }
+  
   function runMilestone(rule){
-    const now=performance.now(); const fx=effectsRef.current;
-    switch(rule.action){
-      case 'seatedSwap': fx.seatedStyle.mode = rule.style||'dance'; fx.seatedStyle.until = now + (rule.durationMs||3000); break;
-      case 'fireworks' : startFireworks(rule.count||14, rule.durationMs||2500); break;
-      case 'confetti'  : startConfetti(rule.density==='high'? 220:120, rule.durationMs||3000); break;
-      case 'groupOverlay': fx.overlay.active=true; fx.overlay.label=rule.label||'GROUP'; fx.overlay.until= now + (rule.durationMs||2500); break;
-      default: break;
+    try {
+      const now=performance.now(); 
+      const fx=effectsRef.current;
+      switch(rule.action){
+        case 'seatedSwap': 
+          fx.seatedStyle.mode = rule.style||'dance'; 
+          fx.seatedStyle.until = now + (rule.durationMs||3000); 
+          break;
+        case 'fireworks' : 
+          startFireworks(rule.count||14, rule.durationMs||2500); 
+          break;
+        case 'confetti'  : 
+          startConfetti(rule.density==='high'? 220:120, rule.durationMs||3000); 
+          break;
+        case 'groupOverlay': 
+          fx.overlay.active=true; 
+          fx.overlay.label=rule.label||'GROUP'; 
+          fx.overlay.until= now + (rule.durationMs||2500); 
+          break;
+        default: 
+          break;
+      }
+    } catch(e) {
+      console.error('Run milestone failed:', e);
     }
   }
 
   // ===== Particles =====
   function startFireworks(count,durationMs){
-    const now=performance.now(); const arr=effectsRef.current.fireworks; const u=uiRef.current; if(!u) return;
-    const W=u.width,H=u.height;
-    for(let i=0;i<count;i++){
-      const cx=Math.random()*W; const cy=Math.random()*H*0.35; const spokes=36;
-      arr.push({type:'fw', cx, cy, spokes, born:now, ttl:durationMs});
+    try {
+      const now=performance.now(); 
+      const arr=effectsRef.current.fireworks; 
+      const u=uiRef.current; 
+      if(!u) return;
+      
+      const W=u.width,H=u.height;
+      for(let i=0;i<count;i++){
+        const cx=Math.random()*W; 
+        const cy=Math.random()*H*0.35; 
+        const spokes=36;
+        arr.push({type:'fw', cx, cy, spokes, born:now, ttl:durationMs});
+      }
+    } catch(e) {
+      console.error('Start fireworks failed:', e);
     }
   }
+  
   function startConfetti(count,durationMs){
-    const now=performance.now(); const arr=effectsRef.current.confetti; const u=uiRef.current; if(!u) return;
-    const W=u.width,H=u.height;
-    for(let i=0;i<count;i++){
-      const x=Math.random()*W; const vy=(H/(durationMs/1000))*(0.6+Math.random()*0.6); const rot=(Math.random()*Math.PI); const size=6+Math.random()*10;
-      arr.push({type:'cf', x, y:-20, vy, rot, born:now, ttl:durationMs, size});
+    try {
+      const now=performance.now(); 
+      const arr=effectsRef.current.confetti; 
+      const u=uiRef.current; 
+      if(!u) return;
+      
+      const W=u.width,H=u.height;
+      for(let i=0;i<count;i++){
+        const x=Math.random()*W; 
+        const vy=(H/(durationMs/1000))*(0.6+Math.random()*0.6); 
+        const rot=(Math.random()*Math.PI); 
+        const size=6+Math.random()*10;
+        arr.push({type:'cf', x, y:-20, vy, rot, born:now, ttl:durationMs, size});
+      }
+    } catch(e) {
+      console.error('Start confetti failed:', e);
     }
   }
   function stepAndDrawEffects(ctx){
-    const now=performance.now(); const fx=effectsRef.current; const u=uiRef.current; if(!u) return; const W=u.width,H=u.height;
-    ctx.save();
-    // fireworks
-    for(let i=fx.fireworks.length-1;i>=0;i--){
-      const p=fx.fireworks[i]; const t=(now-p.born)/p.ttl; if(t>=1){ fx.fireworks.splice(i,1); continue; }
-      const R=80*(0.3+t)*window.devicePixelRatio; ctx.globalAlpha=1-Math.min(1,t);
-      for(let k=0;k<p.spokes;k++){
-        const a=(k/p.spokes)*Math.PI*2; const x=p.cx+Math.cos(a)*R; const y=p.cy+Math.sin(a)*R;
-        ctx.beginPath(); ctx.arc(x,y,2,0,Math.PI*2); ctx.fillStyle='rgba(255,200,80,0.9)'; ctx.fill();
+    try {
+      const now=performance.now(); 
+      const fx=effectsRef.current; 
+      const u=uiRef.current; 
+      if(!u) return; 
+      
+      const W=u.width,H=u.height;
+      ctx.save();
+      
+      // fireworks
+      for(let i=fx.fireworks.length-1;i>=0;i--){
+        const p=fx.fireworks[i]; 
+        const t=(now-p.born)/p.ttl; 
+        if(t>=1){ 
+          fx.fireworks.splice(i,1); 
+          continue; 
+        }
+        const R=80*(0.3+t)*window.devicePixelRatio; 
+        ctx.globalAlpha=1-Math.min(1,t);
+        for(let k=0;k<p.spokes;k++){
+          const a=(k/p.spokes)*Math.PI*2; 
+          const x=p.cx+Math.cos(a)*R; 
+          const y=p.cy+Math.sin(a)*R;
+          ctx.beginPath(); 
+          ctx.arc(x,y,2,0,Math.PI*2); 
+          ctx.fillStyle='rgba(255,200,80,0.9)'; 
+          ctx.fill();
+        }
       }
-    }
-    // confetti
-    for(let i=fx.confetti.length-1;i>=0;i--){
-      const c=fx.confetti[i]; const t=(now-c.born)/c.ttl; if(t>=1 || c.y>H+40){ fx.confetti.splice(i,1); continue; }
-      c.y+=c.vy*(1/60); c.rot+=0.2; ctx.save(); ctx.translate(c.x,c.y); ctx.rotate(c.rot);
-      ctx.fillStyle='rgba(255,255,255,.9)'; ctx.fillRect(-c.size/2,-c.size/4,c.size,c.size/2);
+      
+      // confetti
+      for(let i=fx.confetti.length-1;i>=0;i--){
+        const c=fx.confetti[i]; 
+        const t=(now-c.born)/c.ttl; 
+        if(t>=1 || c.y>H+40){ 
+          fx.confetti.splice(i,1); 
+          continue; 
+        }
+        c.y+=c.vy*(1/60); 
+        c.rot+=0.2; 
+        ctx.save(); 
+        ctx.translate(c.x,c.y); 
+        ctx.rotate(c.rot);
+        ctx.fillStyle='rgba(255,255,255,.9)'; 
+        ctx.fillRect(-c.size/2,-c.size/4,c.size,c.size/2);
+        ctx.restore();
+      }
+      
+      // overlay
+      if(fx.overlay.active){
+        if(now>=fx.overlay.until){ 
+          fx.overlay.active=false; 
+        }
+        else {
+          const pad=20*(window.devicePixelRatio||1);
+          ctx.fillStyle='rgba(0,0,0,.35)'; 
+          ctx.fillRect(pad,pad,W-2*pad, 80*(window.devicePixelRatio||1));
+          ctx.font=`${36*(window.devicePixelRatio||1)}px system-ui`; 
+          ctx.fillStyle='#fff';
+          ctx.fillText(fx.overlay.label, pad+20*(window.devicePixelRatio||1), pad+56*(window.devicePixelRatio||1));
+        }
+      }
       ctx.restore();
+    } catch(e) {
+      console.error('Step and draw effects failed:', e);
     }
-    // overlay
-    if(fx.overlay.active){
-      if(now>=fx.overlay.until){ fx.overlay.active=false; }
-      else {
-        const pad=20*(window.devicePixelRatio||1);
-        ctx.fillStyle='rgba(0,0,0,.35)'; ctx.fillRect(pad,pad,W-2*pad, 80*(window.devicePixelRatio||1));
-        ctx.font=`${36*(window.devicePixelRatio||1)}px system-ui`; ctx.fillStyle='#fff';
-        ctx.fillText(fx.overlay.label, pad+20*(window.devicePixelRatio||1), pad+56*(window.devicePixelRatio||1));
-      }
-    }
-    ctx.restore();
   }
 
   // ===== RAF watchdog =====
   const heartbeatRef = useRef(0);
-  function restartRAF(){ cancelAnimationFrame(rafRef.current||0); rafRef.current = requestAnimationFrame(tick); }
+  function restartRAF(){ 
+    cancelAnimationFrame(rafRef.current||0); 
+    rafRef.current = requestAnimationFrame(tick); 
+  }
+  
   useEffect(()=>{
     const id=setInterval(()=>{
-      const last=heartbeatRef.current||0; if(performance.now()-last>700){ restartRAF(); }
+      const last=heartbeatRef.current||0; 
+      if(performance.now()-last>700){ restartRAF(); }
     }, 800);
     return ()=>clearInterval(id);
   },[]);
+  
   useEffect(()=>{
-    const onVis=()=>{ if(!document.hidden && camReady){ restartRAF(); } };
+    const onVis=()=>{ 
+      if(!document.hidden && camReady){ restartRAF(); } 
+    };
     document.addEventListener('visibilitychange', onVis);
     return ()=>document.removeEventListener('visibilitychange', onVis);
   },[camReady]);
@@ -306,9 +502,16 @@ export default function PullUpRescueV63(){
   const tick = async ()=>{
     heartbeatRef.current = performance.now();
     try{
-      const video=videoRef.current, base=baseRef.current, ui=uiRef.current; if(!video||!base||!ui) return;
-      const b=base.getContext('2d'); const u=ui.getContext('2d');
-      const {W,H,vw,vh,scale,dx,dy,mirrored}=geomRef.current; const inC=inferCanvasRef.current; if(!W) updateGeom();
+      const video=videoRef.current, base=baseRef.current, ui=uiRef.current; 
+      if(!video||!base||!ui) return;
+      
+      const b=base.getContext('2d'); 
+      const u=ui.getContext('2d');
+      if(!b || !u) return;
+      
+      const {W,H,vw,vh,scale,dx,dy,mirrored}=geomRef.current; 
+      const inC=inferCanvasRef.current; 
+      if(!W) updateGeom();
 
       // camera → base
       b.clearRect(0,0,W,H); const dw=vw*scale, dh=vh*scale;
@@ -325,7 +528,13 @@ export default function PullUpRescueV63(){
           lastInferRef.current=now; const ic=inC.getContext('2d');
           const s=Math.max(inC.width/vw, inC.height/vh); const iw=vw*s, ih=vh*s; const ix=(inC.width-iw)/2, iy=(inC.height-ih)/2;
           inferMapRef.current={s,ix,iy}; ic.clearRect(0,0,inC.width,inC.height); ic.drawImage(video, ix, iy, iw, ih);
-          try{ const poses=await detectorRef.current.estimatePoses(inC,{maxPoses:1,flipHorizontal:false}); lastPoseRef.current = (poses && poses[0]) ? poses[0] : null; }catch(e){}
+          try{ 
+            const poses=await detectorRef.current.estimatePoses(inC,{maxPoses:1,flipHorizontal:false}); 
+            lastPoseRef.current = (poses && poses[0]) ? poses[0] : null; 
+          }catch(e){
+            console.warn('Pose detection failed:', e);
+            lastPoseRef.current = null;
+          }
         }
         const pose = lastPoseRef.current;
         if(pose){
@@ -375,9 +584,17 @@ export default function PullUpRescueV63(){
   };
 
   function drawEffectsLayer(ctx){
-    const fx=effectsRef.current; const now=performance.now();
-    if(fx.seatedStyle.until && now>=fx.seatedStyle.until){ fx.seatedStyle.mode='default'; fx.seatedStyle.until=0; }
-    stepAndDrawEffects(ctx);
+    try {
+      const fx=effectsRef.current; 
+      const now=performance.now();
+      if(fx.seatedStyle.until && now>=fx.seatedStyle.until){ 
+        fx.seatedStyle.mode='default'; 
+        fx.seatedStyle.until=0; 
+      }
+      stepAndDrawEffects(ctx);
+    } catch(e) {
+      console.error('Draw effects layer failed:', e);
+    }
   }
 
   function drawPoseMapped(ctx,kps){
@@ -401,30 +618,114 @@ export default function PullUpRescueV63(){
   function catHeightFor(img, w){ return w * (img.height/img.width); }
 
   function spawnCatCentered(){
-    const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const W=u.width; const y=barYRef.current ?? Math.floor(u.height*0.5);
-    catRef.current={ mode:'idle', x:Math.floor(W/2), y:y - CAT_BASELINE_ABOVE_ROPE_PX*p, vx:0, vy:0, lastT:performance.now(), attachDy:0, belowStart:0, maxDepthBelow:0, landUntil:0 };
+    try {
+      const u=uiRef.current; 
+      if(!u) return; 
+      
+      const p=window.devicePixelRatio||1; 
+      const W=u.width; 
+      const y=barYRef.current ?? Math.floor(u.height*0.5);
+      
+      catRef.current={ 
+        mode:'idle', 
+        x:Math.floor(W/2), 
+        y:y - CAT_BASELINE_ABOVE_ROPE_PX*p, 
+        vx:0, 
+        vy:0, 
+        lastT:performance.now(), 
+        attachDy:0, 
+        belowStart:0, 
+        maxDepthBelow:0, 
+        landUntil:0 
+      };
+    } catch(e) {
+      console.error('Spawn cat failed:', e);
+    }
   }
-  function startCatFall(){ const now=performance.now(); const c=catRef.current; c.mode='falling'; c.vx=(Math.random() * 2 - 1) * 24; c.vy=0; c.lastT=now; c.belowStart=0; c.maxDepthBelow=0; }
+  
+  function startCatFall(){ 
+    try {
+      const now=performance.now(); 
+      const c=catRef.current; 
+      c.mode='falling'; 
+      c.vx=(Math.random() * 2 - 1) * 24; 
+      c.vy=0; 
+      c.lastT=now; 
+      c.belowStart=0; 
+      c.maxDepthBelow=0; 
+    } catch(e) {
+      console.error('Start cat fall failed:', e);
+    }
+  }
   function stepActiveCat(){
-    const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const H=u.height; const groundY=H-28*p;
-    const c=catRef.current; const now=performance.now(); const dt=Math.min(0.05,(now-c.lastT)/1000); c.lastT=now;
-    if(c.mode==='falling'){
-      const g=1200*p; c.vy += g*dt; c.y += c.vy*dt; c.x += c.vx*dt;
-      if(c.y >= groundY){ c.y=groundY; c.mode='landing'; c.landUntil = now + CAT_LAND_DURATION_MS; }
-    } else if(c.mode==='landing'){
-      if(now >= c.landUntil){
-        c.mode='seated'; const seat = placeSeatedCat(u); seatedCatsRef.current.push(seat);
-        savedRef.current = savedRef.current + 1; setSaved(v=>v+1); triggerMilestones(savedRef.current);
-        setTimeout(()=>{ spawnCatCentered(); }, 250);
+    try {
+      const u=uiRef.current; 
+      if(!u) return; 
+      
+      const p=window.devicePixelRatio||1; 
+      const H=u.height; 
+      const groundY=H-28*p;
+      
+      const c=catRef.current; 
+      const now=performance.now(); 
+      const dt=Math.min(0.05,(now-c.lastT)/1000); 
+      c.lastT=now;
+      
+      if(c.mode==='falling'){
+        const g=1200*p; 
+        c.vy += g*dt; 
+        c.y += c.vy*dt; 
+        c.x += c.vx*dt;
+        if(c.y >= groundY){ 
+          c.y=groundY; 
+          c.mode='landing'; 
+          c.landUntil = now + CAT_LAND_DURATION_MS; 
+        }
+      } else if(c.mode==='landing'){
+        if(now >= c.landUntil){
+          c.mode='seated'; 
+          const seat = placeSeatedCat(u); 
+          seatedCatsRef.current.push(seat);
+          savedRef.current = savedRef.current + 1; 
+          setSaved(v=>v+1); 
+          triggerMilestones(savedRef.current);
+          setTimeout(()=>{ 
+            try {
+              spawnCatCentered(); 
+            } catch(e) {
+              console.error('Spawn cat in timeout failed:', e);
+            }
+          }, 250);
+        }
       }
+    } catch(e) {
+      console.error('Step active cat failed:', e);
     }
   }
 
   function placeSeatedCat(u){
-    const p=window.devicePixelRatio||1; const W=u.width; const H=u.height; const margin=20*p; const spacing=56*p; const baseY=H-28*p;
-    const count=seatedCatsRef.current.length; const maxPerRow=Math.floor((W-2*margin)/spacing);
-    const row=Math.floor(count/maxPerRow); const col=count%maxPerRow;
-    const x=margin + col*spacing; const y=baseY - row*spacing*0.75; return {x,y};
+    try {
+      const p=window.devicePixelRatio||1; 
+      const W=u.width; 
+      const H=u.height; 
+      const margin=20*p; 
+      const spacing=56*p; 
+      const baseY=H-28*p;
+      
+      const count=seatedCatsRef.current.length; 
+      const maxPerRow=Math.floor((W-2*margin)/spacing);
+      const row=Math.floor(count/maxPerRow); 
+      const col=count%maxPerRow;
+      
+      const x=margin + col*spacing; 
+      const y=baseY - row*spacing*0.75; 
+      
+      return {x,y};
+    } catch(e) {
+      console.error('Place seated cat failed:', e);
+      // Return a safe default position
+      return {x: 100, y: 100};
+    }
   }
 
   function drawSeatedCats(ctx,imgs){
@@ -462,14 +763,86 @@ export default function PullUpRescueV63(){
 
   // ===== Interactions (drag rope) =====
   const draggingRef=useRef(false);
-  function onPointerDown(e){ const y=getY(e); if(y==null) return; setBarY(y); if(catRef.current.mode==='idle') alignCatToBar(); draggingRef.current=true; }
-  function onPointerMove(e){ if(!draggingRef.current) return; const y=getY(e); if(y==null) return; setBarY(y); if(catRef.current.mode==='idle') alignCatToBar(); }
-  function onPointerUp(){ draggingRef.current=false; }
-  function alignCatToBar(){ const p=window.devicePixelRatio||1; catRef.current.y = (barYRef.current ?? 0) - CAT_BASELINE_ABOVE_ROPE_PX*p; }
-  function onTouchStart(e){ e.preventDefault(); onPointerDown(e); }
-  function onTouchMove(e){ e.preventDefault(); onPointerMove(e); }
-  function onTouchEnd(e){ e.preventDefault(); onPointerUp(); }
-  function getY(e){ const rect=uiRef.current.getBoundingClientRect(); const dpr=uiRef.current.width/rect.width; if(e.touches&&e.touches[0]) return (e.touches[0].clientY-rect.top)*dpr; if(typeof e.clientY==='number') return (e.clientY-rect.top)*dpr; return null; }
+  function onPointerDown(e){ 
+    try {
+      const y=getY(e); 
+      if(y==null) return; 
+      setBarY(y); 
+      if(catRef.current.mode==='idle') alignCatToBar(); 
+      draggingRef.current=true; 
+    } catch(e) {
+      console.error('Pointer down failed:', e);
+    }
+  }
+  
+  function onPointerMove(e){ 
+    try {
+      if(!draggingRef.current) return; 
+      const y=getY(e); 
+      if(y==null) return; 
+      setBarY(y); 
+      if(catRef.current.mode==='idle') alignCatToBar(); 
+    } catch(e) {
+      console.error('Pointer move failed:', e);
+    }
+  }
+  
+  function onPointerUp(){ 
+    try {
+      draggingRef.current=false; 
+    } catch(e) {
+      console.error('Pointer up failed:', e);
+    }
+  }
+  
+  function alignCatToBar(){ 
+    try {
+      const p=window.devicePixelRatio||1; 
+      catRef.current.y = (barYRef.current ?? 0) - CAT_BASELINE_ABOVE_ROPE_PX*p; 
+    } catch(e) {
+      console.error('Align cat failed:', e);
+    }
+  }
+  
+  function onTouchStart(e){ 
+    try {
+      e.preventDefault(); 
+      onPointerDown(e); 
+    } catch(e) {
+      console.error('Touch start failed:', e);
+    }
+  }
+  
+  function onTouchMove(e){ 
+    try {
+      e.preventDefault(); 
+      onPointerMove(e); 
+    } catch(e) {
+      console.error('Touch move failed:', e);
+    }
+  }
+  
+  function onTouchEnd(e){ 
+    try {
+      e.preventDefault(); 
+      onPointerUp(); 
+    } catch(e) {
+      console.error('Touch end failed:', e);
+    }
+  }
+  
+  function getY(e){ 
+    try {
+      const rect=uiRef.current.getBoundingClientRect(); 
+      const dpr=uiRef.current.width/rect.width; 
+      if(e.touches&&e.touches[0]) return (e.touches[0].clientY-rect.top)*dpr; 
+      if(typeof e.clientY==='number') return (e.clientY-rect.top)*dpr; 
+      return null; 
+    } catch(e) {
+      console.error('Get Y failed:', e);
+      return null;
+    }
+  }
 
   // ===== Recording =====
   const mediaRecorderRef=useRef(null); const recordedChunksRef=useRef([]);
@@ -482,21 +855,97 @@ export default function PullUpRescueV63(){
     return '';
   }
   function startRecording(){
-    if(!canRecord) return; const rec=recRef.current, base=baseRef.current, ui=uiRef.current; if(!rec||!base||!ui) return;
-    const r=rec.getContext('2d'); rec.width=base.width; rec.height=base.height; const mime=pickMime(); if(!mime) return;
-    recordedChunksRef.current=[]; setRecording(true); recordingRef.current=true;
-    const targetFps=30; const compose=()=>{ if(!recordingRef.current) return; r.clearRect(0,0,rec.width,rec.height); r.drawImage(base,0,0); r.drawImage(ui,0,0); requestAnimationFrame(compose); }; requestAnimationFrame(compose);
-    const stream=rec.captureStream(targetFps); let mr; try{ mr=new MediaRecorder(stream,{mimeType:mime, videoBitsPerSecond: 6_000_000}); }catch{ mr=new MediaRecorder(stream,{mimeType:mime}); }
-    mr.ondataavailable=(e)=>{ if(e.data && e.data.size>0) recordedChunksRef.current.push(e.data); };
-    mr.onstop=()=>{ const type=mr.mimeType||mime; const blob=new Blob(recordedChunksRef.current,{type}); if(!blob || blob.size<150000){ setMsg('Recording tiny — iOS codec limited. Try again or use iOS Screen Recording.'); return; } const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; const ts=new Date().toISOString().replace(/[:.]/g,'-'); a.download=`pullup-rescue-${ts}.${type.includes('mp4')?'mp4':'webm'}`; a.click(); setMsg('Recording saved'); };
-    mediaRecorderRef.current=mr; try{ mr.start(500); }catch{ mr.start(); }
+    if(!canRecord) return; 
+    
+    const rec=recRef.current, base=baseRef.current, ui=uiRef.current; 
+    if(!rec||!base||!ui) return;
+    
+    const r=rec.getContext('2d'); 
+    if(!r) return;
+    
+    rec.width=base.width; 
+    rec.height=base.height; 
+    
+    const mime=pickMime(); 
+    if(!mime) {
+      setMsg('No supported video format found');
+      return;
+    }
+    
+    recordedChunksRef.current=[]; 
+    setRecording(true); 
+    recordingRef.current=true;
+    
+    const targetFps=30; 
+    const compose=()=>{ 
+      if(!recordingRef.current) return; 
+      r.clearRect(0,0,rec.width,rec.height); 
+      r.drawImage(base,0,0); 
+      r.drawImage(ui,0,0); 
+      requestAnimationFrame(compose); 
+    }; 
+    requestAnimationFrame(compose);
+    
+    const stream=rec.captureStream(targetFps); 
+    let mr; 
+    try{ 
+      mr=new MediaRecorder(stream,{mimeType:mime, videoBitsPerSecond: 6_000_000}); 
+    }catch(e){ 
+      console.warn('High bitrate failed, using default:', e);
+      mr=new MediaRecorder(stream,{mimeType:mime}); 
+    }
+    
+    mr.ondataavailable=(e)=>{ 
+      if(e.data && e.data.size>0) recordedChunksRef.current.push(e.data); 
+    };
+    
+    mr.onstop=()=>{ 
+      const type=mr.mimeType||mime; 
+      const blob=new Blob(recordedChunksRef.current,{type}); 
+      if(!blob || blob.size<150000){ 
+        setMsg('Recording tiny — iOS codec limited. Try again or use iOS Screen Recording.'); 
+        return; 
+      } 
+      const url=URL.createObjectURL(blob); 
+      const a=document.createElement('a'); 
+      a.href=url; 
+      const ts=new Date().toISOString().replace(/[:.]/g,'-'); 
+      a.download=`pullup-rescue-${ts}.${type.includes('mp4')?'mp4':'webm'}`; 
+      a.click(); 
+      setMsg('Recording saved'); 
+    };
+    
+    mediaRecorderRef.current=mr; 
+    try{ 
+      mr.start(500); 
+    }catch(e){
+      console.warn('500ms timeslice failed, using default:', e);
+      mr.start(); 
+    }
   }
-  function stopRecording(){ if(mediaRecorderRef.current && mediaRecorderRef.current.state!=='inactive') mediaRecorderRef.current.stop(); setRecording(false); recordingRef.current=false; }
+  function stopRecording(){ 
+    if(mediaRecorderRef.current && mediaRecorderRef.current.state!=='inactive') {
+      try {
+        mediaRecorderRef.current.stop(); 
+      } catch(e) {
+        console.error('Error stopping recording:', e);
+      }
+    }
+    setRecording(false); 
+    recordingRef.current=false; 
+  }
 
   // ===== Render =====
   return (
     <div style={{position:'fixed',inset:0,background:'#000',color:'#fff',overflow:'hidden'}}>
-      <video ref={videoRef} playsInline muted style={{display:'none'}} onLoadedMetadata={()=>{ updateGeom(); if(streamRef.current) setMirrorFromStream(streamRef.current); }} />
+      <video ref={videoRef} playsInline muted style={{display:'none'}} onLoadedMetadata={()=>{ 
+        try {
+          updateGeom(); 
+          if(streamRef.current) setMirrorFromStream(streamRef.current); 
+        } catch(e) {
+          console.error('Video metadata error:', e);
+        }
+      }} />
 
       <canvas ref={baseRef}
         onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
@@ -515,7 +964,15 @@ export default function PullUpRescueV63(){
         <div style={{fontSize:14,opacity:.9}}>Pull‑Up Rescue</div>
         <div style={{display:'flex',gap:8,alignItems:'center'}}>
           {camReady && (
-            <select value={bucketChoice} onChange={async(e)=>{ const b=e.target.value; await switchToBucket(b); }} style={{background:'rgba(255,255,255,.12)',color:'#fff',border:0,borderRadius:10,padding:'6px'}}>
+            <select value={bucketChoice} onChange={async(e)=>{ 
+              try {
+                const b=e.target.value; 
+                await switchToBucket(b); 
+              } catch(e) {
+                console.error('Camera switch failed:', e);
+                setMsg('Camera switch failed. Please try again.');
+              }
+            }} style={{background:'rgba(255,255,255,.12)',color:'#fff',border:0,borderRadius:10,padding:'6px'}}>
               {bucketMapRef.current.ultra && <option value="ultra" style={{color:'#000'}}>Back — Ultra‑Wide (0.5×)</option>}
               {bucketMapRef.current.wide && <option value="wide" style={{color:'#000'}}>Back — Wide (1×)</option>}
               {bucketMapRef.current.front && <option value="front" style={{color:'#000'}}>Front</option>}
@@ -535,19 +992,47 @@ export default function PullUpRescueV63(){
             <button onClick={stopRecording} style={btn(1,'#ef4444')}>Stop</button>
           )}
           <button onClick={()=>{
-            savedRef.current=0; setSaved(0);
-            repRef.current={phase:'down',lastAbove:0,lastRepAt:0};
-            seatedCatsRef.current=[]; firedMilestonesRef.current=new Set();
-            effectsRef.current={ fireworks:[], confetti:[], overlay:{active:false,label:'',until:0}, seatedStyle:{mode:'default',until:0} };
-            spawnCatCentered(); restartRAF();
+            try {
+              savedRef.current=0; 
+              setSaved(0);
+              repRef.current={phase:'down',lastAbove:0,lastRepAt:0};
+              seatedCatsRef.current=[]; 
+              firedMilestonesRef.current=new Set();
+              effectsRef.current={ 
+                fireworks:[], 
+                confetti:[], 
+                overlay:{active:false,label:'',until:0}, 
+                seatedStyle:{mode:'default',until:0} 
+              };
+              spawnCatCentered(); 
+              restartRAF();
+            } catch(e) {
+              console.error('Reset failed:', e);
+              setMsg('Reset failed. Please try again.');
+            }
           }} style={btn()}>Reset</button>
         </div>
         <div style={{display:'grid',gridTemplateColumns:'1fr auto',alignItems:'center',gap:8}}>
           <Labeled label={`Sensitivity (px above rope): ${sensitivity}`}>
-            <input type="range" min={8} max={80} step={1} value={sensitivity} onChange={(e)=>{ const v=parseInt(e.target.value,10); setSensitivity(v); }} style={{width:'100%'}} />
+            <input type="range" min={8} max={80} step={1} value={sensitivity} onChange={(e)=>{ 
+              try {
+                const v=parseInt(e.target.value,10); 
+                if(!isNaN(v)) {
+                  setSensitivity(v); 
+                }
+              } catch(e) {
+                console.error('Sensitivity change failed:', e);
+              }
+            }} style={{width:'100%'}} />
           </Labeled>
           <label style={{display:'flex',gap:6,alignItems:'center',fontSize:12,opacity:.85}}>
-            <input type="checkbox" checked={showPose} onChange={(e)=>setShowPose(e.target.checked)} /> Show pose
+            <input type="checkbox" checked={showPose} onChange={(e)=>{
+              try {
+                setShowPose(e.target.checked);
+              } catch(e) {
+                console.error('Show pose toggle failed:', e);
+              }
+            }} /> Show pose
           </label>
         </div>
         <div style={{fontSize:12,opacity:.85,textAlign:'center'}}>{msg}</div>
