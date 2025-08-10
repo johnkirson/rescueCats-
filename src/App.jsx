@@ -98,6 +98,11 @@ export default function PullUpRescueV63(){
   const [bucketChoice,setBucketChoice]=useState('ultra');
   const [msg,setMsg]=useState('Drag the rope to the bar height'); const [debug,setDebug]=useState('');
   const [recording,setRecording]=useState(false); const recordingRef=useRef(false);
+  
+  // Welcome screen state
+  const [currentScreen, setCurrentScreen] = useState('welcome'); // 'welcome', 'game', 'results'
+  const [playerName, setPlayerName] = useState('');
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [canRecord,setCanRecord]=useState(false);
   const [barY,setBarY]=useState(null); const barYRef=useRef(null);
   const [sensitivity,setSensitivity]=useState(DEFAULT_SENSITIVITY); const sensitivityRef=useRef(DEFAULT_SENSITIVITY);
@@ -136,6 +141,30 @@ export default function PullUpRescueV63(){
     // Start RAF immediately to show UI
     restartRAF();
   }, []);
+
+  // ===== Screen management functions =====
+  const startGame = () => {
+    setCurrentScreen('game');
+    // Auto-start camera when game starts
+    setTimeout(() => {
+      enableCamera();
+    }, 100);
+  };
+
+  const showResults = () => {
+    setCurrentScreen('results');
+  };
+
+  const backToWelcome = () => {
+    setCurrentScreen('welcome');
+  };
+
+  const handleLogin = () => {
+    if (playerName.trim()) {
+      setIsLoggedIn(true);
+      setMsg(`Welcome, ${playerName}!`);
+    }
+  };
 
   // ===== Helpers for labels =====
   const isFrontLabel=(label='')=>/front|user|face/i.test(label);
@@ -1163,31 +1192,262 @@ export default function PullUpRescueV63(){
   // ===== Render =====
   return (
     <div style={{position:'fixed',inset:0,background:'#000',color:'#fff',overflow:'hidden'}}>
-      <video ref={videoRef} playsInline muted style={{display:'none'}} onLoadedMetadata={()=>{ 
-        try {
-          updateGeom(); 
-          if(streamRef.current) setMirrorFromStream(streamRef.current); 
-        } catch(e) {
-          console.error('Video metadata error:', e);
-        }
-      }} />
+      {/* Welcome Screen */}
+      {currentScreen === 'welcome' && (
+        <div style={{
+          position: 'absolute',
+          inset: 0,
+          background: 'linear-gradient(135deg, #1e3a8a 0%, #3b82f6 50%, #1e40af 100%)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '20px',
+          textAlign: 'center'
+        }}>
+          {/* App Logo/Image */}
+          <div style={{
+            width: '120px',
+            height: '120px',
+            background: 'rgba(255,255,255,0.1)',
+            borderRadius: '50%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            marginBottom: '30px',
+            border: '2px solid rgba(255,255,255,0.2)'
+          }}>
+            <span style={{ fontSize: '48px', opacity: 0.8 }}>🐱</span>
+          </div>
 
-      <canvas ref={baseRef}
-        onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
-        onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
-        style={{position:'absolute',inset:0,touchAction:'none'}} />
+          {/* App Title */}
+          <h1 style={{
+            fontSize: '36px',
+            fontWeight: 'bold',
+            margin: '0 0 10px 0',
+            textShadow: '0 2px 4px rgba(0,0,0,0.3)'
+          }}>
+            Pull-Up Rescue
+          </h1>
+          
+          <p style={{
+            fontSize: '16px',
+            opacity: 0.8,
+            margin: '0 0 40px 0',
+            maxWidth: '300px'
+          }}>
+            Спаси котиков, выполняя подтягивания!
+          </p>
 
-      <canvas ref={uiRef}
-        onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
-        onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
-        style={{position:'absolute',inset:0,touchAction:'none'}} />
+          {/* Login Section */}
+          {!isLoggedIn && (
+            <div style={{
+              background: 'rgba(255,255,255,0.1)',
+              padding: '20px',
+              borderRadius: '16px',
+              marginBottom: '30px',
+              backdropFilter: 'blur(10px)',
+              border: '1px solid rgba(255,255,255,0.2)'
+            }}>
+              <input
+                type="text"
+                placeholder="Введите ваше имя"
+                value={playerName}
+                onChange={(e) => setPlayerName(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  border: 'none',
+                  borderRadius: '8px',
+                  background: 'rgba(255,255,255,0.9)',
+                  color: '#1e3a8a',
+                  fontSize: '16px',
+                  marginBottom: '12px'
+                }}
+              />
+              <button
+                onClick={handleLogin}
+                disabled={!playerName.trim()}
+                style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  border: 'none',
+                  borderRadius: '8px',
+                  background: playerName.trim() ? '#22c55e' : 'rgba(255,255,255,0.3)',
+                  color: '#fff',
+                  fontSize: '16px',
+                  cursor: playerName.trim() ? 'pointer' : 'not-allowed',
+                  transition: 'all 0.2s ease'
+                }}
+              >
+                Войти
+              </button>
+            </div>
+          )}
 
-      <canvas ref={recRef} style={{display:'none'}} />
+          {/* Main Buttons */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', width: '100%', maxWidth: '280px' }}>
+            <button
+              onClick={startGame}
+              disabled={!isLoggedIn}
+              style={{
+                padding: '16px 24px',
+                border: 'none',
+                borderRadius: '12px',
+                background: isLoggedIn ? '#22c55e' : 'rgba(255,255,255,0.3)',
+                color: '#fff',
+                fontSize: '18px',
+                fontWeight: 'bold',
+                cursor: isLoggedIn ? 'pointer' : 'not-allowed',
+                transition: 'all 0.2s ease',
+                boxShadow: isLoggedIn ? '0 4px 12px rgba(34, 197, 94, 0.3)' : 'none'
+              }}
+            >
+              Начать игру
+            </button>
 
-      {/* Top bar */}
+            <button
+              onClick={showResults}
+              style={{
+                padding: '16px 24px',
+                borderRadius: '12px',
+                background: 'rgba(255,255,255,0.1)',
+                color: '#fff',
+                fontSize: '18px',
+                fontWeight: 'bold',
+                cursor: 'pointer',
+                transition: 'all 0.2s ease',
+                border: '1px solid rgba(255,255,255,0.2)'
+              }}
+            >
+              Посмотреть результаты
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Results Screen */}
+      {currentScreen === 'results' && (
+        <div style={{
+          position: 'absolute',
+          inset: 0,
+          background: 'linear-gradient(135deg, #1e3a8a 0%, #3b82f6 50%, #1e40af 100%)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '20px',
+          textAlign: 'center'
+        }}>
+          <h1 style={{
+            fontSize: '32px',
+            fontWeight: 'bold',
+            margin: '0 0 30px 0',
+            textShadow: '0 2px 4px rgba(0,0,0,0.3)'
+          }}>
+            Результаты
+          </h1>
+
+          {/* Personal Results */}
+          <div style={{
+            background: 'rgba(255,255,255,0.1)',
+            padding: '20px',
+            borderRadius: '16px',
+            marginBottom: '20px',
+            backdropFilter: 'blur(10px)',
+            border: '1px solid rgba(255,255,255,0.2)',
+            width: '100%',
+            maxWidth: '320px'
+          }}>
+            <h3 style={{ margin: '0 0 15px 0', fontSize: '18px' }}>Личные результаты</h3>
+            <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#22c55e' }}>
+              {saved} котов спасено
+            </div>
+            <div style={{ fontSize: '14px', opacity: 0.7, marginTop: '8px' }}>
+              Лучший результат: 15 котов
+            </div>
+          </div>
+
+          {/* Overall Results */}
+          <div style={{
+            background: 'rgba(255,255,255,0.1)',
+            padding: '20px',
+            borderRadius: '16px',
+            marginBottom: '30px',
+            backdropFilter: 'blur(10px)',
+            border: '1px solid rgba(255,255,255,0.2)',
+            width: '100%',
+            maxWidth: '320px'
+          }}>
+            <h3 style={{ margin: '0 0 15px 0', fontSize: '18px' }}>Общие результаты</h3>
+            <div style={{ fontSize: '16px', lineHeight: '1.6' }}>
+              <div>Всего игроков: 1,247</div>
+              <div>Всего спасено: 8,943 кота</div>
+              <div>Рекорд: 42 кота (Игрок123)</div>
+            </div>
+          </div>
+
+          <button
+            onClick={backToWelcome}
+            style={{
+              padding: '14px 24px',
+              borderRadius: '10px',
+              background: 'rgba(255,255,255,0.1)',
+              color: '#fff',
+              fontSize: '16px',
+              cursor: 'pointer',
+              transition: 'all 0.2s ease',
+              border: '1px solid rgba(255,255,255,0.2)'
+            }}
+          >
+            Назад
+          </button>
+        </div>
+      )}
+
+      {/* Game Screen */}
+      {currentScreen === 'game' && (
+        <>
+          <video ref={videoRef} playsInline muted style={{display:'none'}} onLoadedMetadata={()=>{ 
+            try {
+              updateGeom(); 
+              if(streamRef.current) setMirrorFromStream(streamRef.current); 
+            } catch(e) {
+              console.error('Video metadata error:', e);
+            }
+          }} />
+
+          <canvas ref={baseRef}
+            onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
+            onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
+            style={{position:'absolute',inset:0,touchAction:'none'}} />
+
+          <canvas ref={uiRef}
+            onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
+            onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
+            style={{position:'absolute',inset:0,touchAction:'none'}} />
+
+                    <canvas ref={recRef} style={{display:'none'}} />
+
+                {/* Top bar */}
       <div style={{position:'absolute',top:0,left:0,right:0,padding:'10px env(safe-area-inset-right) 10px env(safe-area-inset-left)',display:'flex',justifyContent:'space-between',alignItems:'center',gap:8}}>
         <div style={{fontSize:14,opacity:.9}}>Pull‑Up Rescue</div>
         <div style={{display:'flex',gap:8,alignItems:'center'}}>
+          <button
+            onClick={backToWelcome}
+            style={{
+              padding: '6px 12px',
+              borderRadius: '8px',
+              background: 'rgba(255,255,255,0.1)',
+              color: '#fff',
+              fontSize: '12px',
+              cursor: 'pointer',
+              transition: 'all 0.2s ease',
+              border: '1px solid rgba(255,255,255,0.2)'
+            }}
+          >
+            Меню
+          </button>
           {camReady && (
             <select value={bucketChoice} onChange={async(e)=>{ 
               try {
@@ -1212,7 +1472,7 @@ export default function PullUpRescueV63(){
       <div style={{position:'absolute',left:0,right:0,bottom:0,padding:'10px env(safe-area-inset-right) 14px env(safe-area-inset-left)',display:'grid',gap:8}}>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
           {!camReady ? (
-            <button onClick={enableCamera} style={btn(1,'#22c55e')}>Enable Camera</button>
+            <button onClick={enableCamera} style={btn(1,'#22c55e')}>Начать игру</button>
           ) : !recording ? (
             <button onClick={startRecording} disabled={!canRecord} style={btn(canRecord?1:.5)}>Start Recording</button>
           ) : (
@@ -1291,6 +1551,8 @@ export default function PullUpRescueV63(){
         <div style={{fontSize:12,opacity:.85,textAlign:'center'}}>{msg}</div>
         {debug && (<div style={{fontSize:10,opacity:.6,textAlign:'center',userSelect:'all'}}>{debug}</div>)}
       </div>
+        </>
+      )}
     </div>
   );
 }
