@@ -153,8 +153,8 @@ export default function PullUpRescueV63(){
         if (!rafRef.current) {
           restartRAF();
         }
-        // Then start camera
-        enableCamera();
+        // НЕ запускаем камеру автоматически - пользователь сам выберет когда
+        // enableCamera();
       } catch(e) {
         console.error('Failed to start game:', e);
       }
@@ -232,10 +232,10 @@ export default function PullUpRescueV63(){
             restartRAF();
           }
           
-          // Always try to start camera when entering game screen
-          if (!camReady) {
-            enableCamera();
-          }
+          // НЕ запускаем камеру автоматически - только по кнопке
+          // if (!camReady) {
+          //   enableCamera();
+          // }
           
           // Spawn cat immediately if sprites are loaded
           if (Object.keys(imgs).length > 0) {
@@ -1380,7 +1380,10 @@ export default function PullUpRescueV63(){
             animation: 'slideInDown 1s ease-out 0.2s both'
           }}>
             Спаси котиков, выполняя<br />
-            <strong>подтягивания</strong>! 🏋️‍♂️
+            <strong>подтягивания</strong>! 🏋️‍♂️<br />
+            <span style={{ fontSize: '0.9em', opacity: 0.8 }}>
+              Камера запустится только после нажатия кнопки "Старт"
+            </span>
           </p>
 
           {/* Login Section */}
@@ -1978,6 +1981,38 @@ export default function PullUpRescueV63(){
             gap: '12px',
             alignItems: 'center'
           }}>
+            
+            {/* Camera Status Message */}
+            {!camReady && (
+              <div style={{
+                background: 'rgba(0,0,0,0.8)',
+                borderRadius: '16px',
+                padding: '16px 24px',
+                backdropFilter: 'blur(10px)',
+                border: '2px solid rgba(59, 130, 246, 0.5)',
+                boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+                textAlign: 'center',
+                maxWidth: '400px',
+                animation: 'pulse 2s ease-in-out infinite'
+              }}>
+                <div style={{
+                  fontSize: '16px',
+                  fontWeight: '600',
+                  color: '#ffffff',
+                  marginBottom: '8px'
+                }}>
+                  📷 Камера не запущена
+                </div>
+                <div style={{
+                  fontSize: '14px',
+                  color: 'rgba(255,255,255,0.8)',
+                  lineHeight: '1.4'
+                }}>
+                  Нажмите кнопку "🚀 Старт" ниже, чтобы запустить камеру и начать игру
+                </div>
+              </div>
+            )}
+            
             {/* Main Control Buttons */}
             <div style={{
               display: 'flex',
@@ -2152,6 +2187,49 @@ export default function PullUpRescueV63(){
                 >
                   📷 Камера
                 </button>
+                
+                {/* Camera Stop Button - Only show when camera is active */}
+                {camReady && (
+                  <button 
+                    onClick={() => {
+                      try {
+                        if(streamRef.current) {
+                          streamRef.current.getTracks().forEach(track => track.stop());
+                          streamRef.current = null;
+                        }
+                        setCamReady(false);
+                        setMsg('Камера остановлена');
+                      } catch(e) {
+                        console.error('Failed to stop camera:', e);
+                        setMsg('Ошибка остановки камеры');
+                      }
+                    }}
+                    style={{
+                      background: 'linear-gradient(135deg, #dc2626, #b91c1c)',
+                      border: 'none',
+                      borderRadius: '16px',
+                      padding: '12px 24px',
+                      fontSize: '16px',
+                      fontWeight: '600',
+                      color: '#ffffff',
+                      cursor: 'pointer',
+                      transition: 'all 0.3s ease',
+                      boxShadow: '0 4px 20px rgba(220, 38, 38, 0.4)',
+                      minWidth: '100px',
+                      marginTop: '8px'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.target.style.transform = 'translateY(-3px) scale(1.05)';
+                      e.target.style.boxShadow = '0 8px 30px rgba(220, 38, 38, 0.6)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.target.style.transform = 'translateY(0) scale(1)';
+                      e.target.style.boxShadow = '0 4px 20px rgba(220, 38, 38, 0.4)';
+                    }}
+                  >
+                    🛑 Остановить камеру
+                  </button>
+                )}
                 
                 {/* Enhanced Camera Dropdown Menu */}
                 {showCameraMenu && (
@@ -2384,10 +2462,11 @@ export default function PullUpRescueV63(){
             color: 'rgba(255,255,255,0.8)',
             lineHeight: '1.5'
           }}>
-            1. Встаньте перед камерой<br />
-            2. Возьмитесь за воображаемую перекладину<br />
-            3. Выполняйте подтягивания<br />
-            4. Спасайте котиков!
+            1. Нажмите кнопку "🚀 Старт" для запуска камеры<br />
+            2. Встаньте перед камерой<br />
+            3. Возьмитесь за воображаемую перекладину<br />
+            4. Выполняйте подтягивания<br />
+            5. Спасайте котиков!
           </div>
           <button
             onClick={() => {
