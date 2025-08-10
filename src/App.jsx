@@ -27,7 +27,7 @@ export const INFER_EVERY_MS = 70;              // частота инферен�
 // ——— Sprite sizing ———
 export const CAT_BASE_WIDTH_PX = 64;    // базовая логическая ширина спрайтов кота
 export const CAT_GLOBAL_SCALE = 1.5;    // глобальный масштаб всех спрайтов кота
-export const CAT_PER_STATE_SCALE = { idle:1.00, attached:1.00, falling:1.00, landing:1.00, seated:0.65 };
+export const CAT_PER_STATE_SCALE = { idle:1.00, attached:1.00, falling:1.00, landing:1.00, seated:0.80 };
 export const CAT_Y_NUDGE_PX     = { idle:0,    attached:0,    falling:0,    landing:0,    seated:0 };
 
 // ——— Rope scaling (X/Y) ———
@@ -96,6 +96,7 @@ export default function PullUpRescueV63(){
   const bucketMapRef = useRef({ultra:null,wide:null,front:null});
   useEffect(()=>{ bucketMapRef.current = bucketMap; }, [bucketMap]);
   const [bucketChoice,setBucketChoice]=useState('ultra');
+  const [showCameraMenu,setShowCameraMenu]=useState(false);
   const [msg,setMsg]=useState('Drag the rope to the bar height'); const [debug,setDebug]=useState('');
   const [recording,setRecording]=useState(false); const recordingRef=useRef(false);
   
@@ -216,6 +217,20 @@ export default function PullUpRescueV63(){
       setMediaRecorder(null);
     };
   }, []);
+
+  // ===== Close camera menu when clicking outside =====
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (showCameraMenu) {
+        setShowCameraMenu(false);
+      }
+    };
+
+    if (showCameraMenu) {
+      document.addEventListener('click', handleClickOutside);
+      return () => document.removeEventListener('click', handleClickOutside);
+    }
+  }, [showCameraMenu]);
 
   // ===== Game screen initialization =====
   useEffect(() => {
@@ -968,7 +983,7 @@ export default function PullUpRescueV63(){
       const H=u.height; 
       const margin=20*p; 
       const spacing=40*p; // Уменьшили расстояние между котиками
-      const baseY=H-120*p; // Подняли выше от низа экрана, чтобы не перекрывать кнопки
+      const baseY=H-80*p; // Опустили ниже, так как кнопки сместились выше
       
       const count=seatedCatsRef.current.length; 
       const maxPerRow=Math.floor((W-2*margin)/spacing);
@@ -1591,29 +1606,63 @@ export default function PullUpRescueV63(){
             gap: '8px',
             alignItems: 'center'
           }}>
-            {/* Camera Selection */}
+            {/* Camera Selection - Single Button with Dropdown */}
             <div style={{
-              display: 'flex',
-              gap: '6px',
-              justifyContent: 'center',
+              position: 'relative',
               marginBottom: '8px'
             }}>
-              {bucketMap && Object.keys(bucketMap).map((bucket, i) => (
-                <button
-                  key={bucket}
-                  onClick={() => switchToBucket(bucket)}
-                  style={{
-                    ...btn(0.8, bucketChoice === bucket ? 'rgba(34, 197, 94, 0.3)' : 'rgba(0,0,0,0.3)'),
-                    padding: '6px 12px',
-                    fontSize: '12px',
-                    minWidth: '60px'
-                  }}
-                >
-                  {bucket === 'front' ? 'Фронт' : 
-                   bucket === 'back' ? 'Задняя' : 
-                   bucket === 'ultra' ? 'Ультра' : 'Широкая'}
-                </button>
-              ))}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowCameraMenu(!showCameraMenu);
+                }}
+                style={{
+                  ...btn(0.8, 'rgba(59, 130, 246, 0.3)'),
+                  padding: '8px 16px',
+                  fontSize: '14px',
+                  minWidth: '80px'
+                }}
+              >
+                Камера
+              </button>
+              
+              {showCameraMenu && (
+                <div style={{
+                  position: 'absolute',
+                  bottom: '100%',
+                  left: '50%',
+                  transform: 'translateX(-50%)',
+                  marginBottom: '8px',
+                  backgroundColor: 'rgba(0,0,0,0.8)',
+                  borderRadius: '8px',
+                  padding: '8px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '4px',
+                  zIndex: 20
+                }}>
+                  {bucketMap && Object.keys(bucketMap).map((bucket) => (
+                    <button
+                      key={bucket}
+                      onClick={() => {
+                        switchToBucket(bucket);
+                        setShowCameraMenu(false);
+                      }}
+                      style={{
+                        ...btn(0.9, bucketChoice === bucket ? 'rgba(34, 197, 94, 0.3)' : 'rgba(255,255,255,0.1)'),
+                        padding: '6px 12px',
+                        fontSize: '12px',
+                        minWidth: '60px',
+                        whiteSpace: 'nowrap'
+                      }}
+                    >
+                      {bucket === 'front' ? 'Фронт' : 
+                       bucket === 'back' ? 'Задняя' : 
+                       bucket === 'ultra' ? 'Ультра' : 'Широкая'}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Main Control Buttons */}
@@ -1652,6 +1701,7 @@ export default function PullUpRescueV63(){
                 try {
                   setSaved(0);
                   setMsg('Счетчик сброшен');
+                  // НЕ сбрасываем сидящих котов - только счетчик
                   if (catRef.current) {
                     catRef.current.lastT = 0;
                     catRef.current.mode = 'idle';
@@ -1666,6 +1716,17 @@ export default function PullUpRescueV63(){
                 fontSize: '14px'
               }}>
                 Сброс
+              </button>
+
+              <button onClick={(e) => {
+                e.stopPropagation();
+                setShowCameraMenu(!showCameraMenu);
+              }} style={{
+                ...btn(0.9, 'rgba(59, 130, 246, 0.3)'),
+                padding: '8px 16px',
+                fontSize: '14px'
+              }}>
+                Камера
               </button>
             </div>
 
