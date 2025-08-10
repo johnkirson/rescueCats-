@@ -146,10 +146,19 @@ export default function PullUpRescueV63(){
   // ===== Screen management functions =====
   const startGame = () => {
     setCurrentScreen('game');
-    // Auto-start camera when game starts
+    // Wait for the game screen to render before starting camera
     setTimeout(() => {
-      enableCamera();
-    }, 100);
+      try {
+        // Ensure RAF is running first
+        if (!rafRef.current) {
+          restartRAF();
+        }
+        // Then start camera
+        enableCamera();
+      } catch(e) {
+        console.error('Failed to start game:', e);
+      }
+    }, 300);
   };
 
   const showResults = () => {
@@ -208,28 +217,61 @@ export default function PullUpRescueV63(){
     };
   }, []);
 
+  // ===== Game screen initialization =====
+  useEffect(() => {
+    if (currentScreen === 'game') {
+      // Ensure proper initialization when game screen becomes active
+      setTimeout(() => {
+        try {
+          // Force resize to update canvas dimensions
+          const resizeEvent = new Event('resize');
+          window.dispatchEvent(resizeEvent);
+          
+          // Ensure RAF is running
+          if (!rafRef.current) {
+            restartRAF();
+          }
+        } catch(e) {
+          console.error('Game screen initialization failed:', e);
+        }
+      }, 100);
+    }
+  }, [currentScreen]);
+
   // ===== Resize handling =====
   useEffect(()=>{
     const resize=()=>{
       const dpr=Math.max(1,Math.min(3,window.devicePixelRatio||1));
       const W=window.innerWidth, H=window.innerHeight;
+      
+      // Update canvas dimensions
       [baseRef.current,uiRef.current,recRef.current].forEach(cv=>{
-        if(!cv) return; cv.style.width=W+'px'; cv.style.height=H+'px'; cv.width=Math.floor(W*dpr); cv.height=Math.floor(H*dpr);
+        if(!cv) return; 
+        cv.style.width=W+'px'; 
+        cv.style.height=H+'px'; 
+        cv.width=Math.floor(W*dpr); 
+        cv.height=Math.floor(H*dpr);
       });
+      
+      // Set barY if not already set
       if (barYRef.current==null) {
         const mid=Math.floor((uiRef.current?.height || H)*0.5); 
         setBarY(mid);
         barYRef.current = mid;
       }
+      
+      // Update geometry
       updateGeom(); 
+      
       // Spawn cat if it doesn't exist and sprites are loaded
-      if(!catRef.current.lastT && Object.keys(imgs).length > 0) {
+      if(!catRef.current.lastT && Object.keys(imgs).length > 0 && barYRef.current !== null) {
         try {
           spawnCatCentered();
         } catch(e) {
           console.error('Spawn cat in resize failed:', e);
         }
       }
+      
       // Ensure RAF is running
       if (!rafRef.current) {
         restartRAF();
@@ -340,7 +382,7 @@ export default function PullUpRescueV63(){
         setBarY(mid);
         barYRef.current = mid;
         // Wait a bit for the state to update
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
       
       setCamReady(true);
@@ -349,15 +391,18 @@ export default function PullUpRescueV63(){
       setTimeout(() => {
         try {
           updateGeom();
-          restartRAF();
+          // Ensure RAF is running
+          if (!rafRef.current) {
+            restartRAF();
+          }
           // Spawn cat after everything is ready
-          if (Object.keys(imgs).length > 0) {
+          if (Object.keys(imgs).length > 0 && barYRef.current !== null) {
             spawnCatCentered();
           }
         } catch(e) {
           console.error('Post-camera initialization failed:', e);
         }
-      }, 200);
+      }, 300);
     }catch(e){ 
       console.error('Camera initialization failed:', e); 
       setMsg('Camera init failed.'); 
@@ -1545,6 +1590,8 @@ export default function PullUpRescueV63(){
                 ref={baseRef}
                 style={{
                   position: 'absolute',
+                  top: 0,
+                  left: 0,
                   width: '100%',
                   height: '100%',
                   borderRadius: '12px',
@@ -1562,6 +1609,8 @@ export default function PullUpRescueV63(){
                 ref={uiRef}
                 style={{
                   position: 'absolute',
+                  top: 0,
+                  left: 0,
                   width: '100%',
                   height: '100%',
                   borderRadius: '12px',
