@@ -5,16 +5,13 @@ import "@tensorflow/tfjs-backend-webgl";
 import "@tensorflow/tfjs-converter";
 
 /**
- * v6.3 → v6.3.1 (minimal patch)
- * ----------------------------------------
- * Fix: зелёная пунктирная линия и трос не появляются до Enable Camera.
- * Изменения (минимально):
- * 1) В resize() больше НЕ выставляем barY.
- * 2) В enableCamera() после успешного включения камеры выставляем barY по центру и спавним кота.
- * 3) spawnCatCentered(initialY?) принимает опциональный Y.
- * 4) В tick(): overlays (rope/threshold/cats) рисуются только при (camReady && barY!=null).
- *
- * Остальной код из твоего рабочего App 65.jsx без изменений.
+ * v6.3 — Complete, de-frozen build (previous working)
+ * --------------------------------------------------
+ * - Полный, самодостаточный App.jsx без пропусков/обрывов.
+ * - Исправлен возможный фриз rAF (try/finally + watchdog + перезапуск при reset/enable).
+ * - Камеры переключаются через актуальную mapRef.
+ * - Сохранены механики v5.8 и v6.x: трос, кот, delayed drop, landing(7)->seated без idle‑флика,
+ *   счётчик, запись, масштаб троса X/Y, milestones.
  */
 
 // ===================== CALIBRATION =====================
@@ -139,13 +136,10 @@ export default function PullUpRescueV63(){
       [baseRef.current,uiRef.current,recRef.current].forEach(cv=>{
         if(!cv) return; cv.style.width=W+'px'; cv.style.height=H+'px'; cv.width=Math.floor(W*dpr); cv.height=Math.floor(H*dpr);
       });
-      // PATCH: НЕ выставляем barY до включения камеры
-      // if (uiRef.current && barYRef.current==null) {
-      //   const mid=Math.floor(uiRef.current.height*0.5); setBarY(mid);
-      // }
-      updateGeom();
-      // PATCH: кота не спавним до камеры
-      // if(!catRef.current.lastT) spawnCatCentered();
+      if (uiRef.current && barYRef.current==null) {
+        const mid=Math.floor(uiRef.current.height*0.5); setBarY(mid);
+      }
+      updateGeom(); if(!catRef.current.lastT) spawnCatCentered();
     };
     resize(); window.addEventListener('resize',resize);
     return()=>window.removeEventListener('resize',resize);
@@ -195,12 +189,6 @@ export default function PullUpRescueV63(){
       const preferred=buckets.ultra?'ultra':(buckets.wide?'wide':'front');
       await switchToBucket(preferred, buckets);
       setCamReady(true);
-      // PATCH: выставляем порог только теперь, после включения камеры
-      if (uiRef.current) {
-        const mid = Math.floor(uiRef.current.height * 0.5);
-        setBarY(mid);
-        spawnCatCentered(mid); // передаём Y, чтобы кот сразу оказался на верёвке
-      }
       restartRAF();
     }catch(e){ console.error(e); setMsg('Camera init failed.'); setDebug(`${e.name||'Error'}: ${e.message||e}`); }
   }
@@ -368,13 +356,11 @@ export default function PullUpRescueV63(){
         }
       }
 
-      // overlays — РИСУЕМ ТОЛЬКО КОГДА ЕСТЬ КАМЕРА И ПОРОГ
-      if (camReady && barYRef.current != null) {
-        drawRopeSprite(u,W,H,barYRef.current,imgs.rope);
-        drawThreshold(u,W,H,barYRef.current,sensitivityRef.current);
-        drawSeatedCats(u,imgs);
-        drawActiveCat(u,imgs);
-      }
+      // overlays
+      drawRopeSprite(u,W,H,barYRef.current,imgs.rope);
+      drawThreshold(u,W,H,barYRef.current,sensitivityRef.current);
+      drawSeatedCats(u,imgs);
+      drawActiveCat(u,imgs);
 
       // effects layer
       drawEffectsLayer(u);
@@ -414,10 +400,8 @@ export default function PullUpRescueV63(){
   function catWidthPx(state){ const dpr=window.devicePixelRatio||1; const local=(CAT_PER_STATE_SCALE[state] ?? 1)*CAT_GLOBAL_SCALE; return CAT_BASE_WIDTH_PX * local * dpr; }
   function catHeightFor(img, w){ return w * (img.height/img.width); }
 
-  // PATCH: принимаем initialY
-  function spawnCatCentered(initialY){
-    const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const W=u.width;
-    const y = (initialY!=null) ? initialY : (barYRef.current ?? Math.floor(u.height*0.5));
+  function spawnCatCentered(){
+    const u=uiRef.current; if(!u) return; const p=window.devicePixelRatio||1; const W=u.width; const y=barYRef.current ?? Math.floor(u.height*0.5);
     catRef.current={ mode:'idle', x:Math.floor(W/2), y:y - CAT_BASELINE_ABOVE_ROPE_PX*p, vx:0, vy:0, lastT:performance.now(), attachDy:0, belowStart:0, maxDepthBelow:0, landUntil:0 };
   }
   function startCatFall(){ const now=performance.now(); const c=catRef.current; c.mode='falling'; c.vx=(Math.random() * 2 - 1) * 24; c.vy=0; c.lastT=now; c.belowStart=0; c.maxDepthBelow=0; }
