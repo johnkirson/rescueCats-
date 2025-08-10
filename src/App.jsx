@@ -5,13 +5,13 @@ import "@tensorflow/tfjs-backend-webgl";
 import "@tensorflow/tfjs-converter";
 
 /**
- * v6.3 — Complete, de-frozen build
+ * v6.3 — Complete, de-frozen build (previous working)
  * --------------------------------------------------
  * - Полный, самодостаточный App.jsx без пропусков/обрывов.
  * - Исправлен возможный фриз rAF (try/finally + watchdog + перезапуск при reset/enable).
- * - Камеры переключаются через актуальную mapRef (без «застывшего» state).
- * - Сохранены механики v5.8 и v6.x: трос, кот, delayed drop, landing(7)->seated без idle-флика,
- *   счётчик, записи, масштаб троса X/Y, milestones-движок (fireworks/confetti/overlay/seat-swap).
+ * - Камеры переключаются через актуальную mapRef.
+ * - Сохранены механики v5.8 и v6.x: трос, кот, delayed drop, landing(7)->seated без idle‑флика,
+ *   счётчик, запись, масштаб троса X/Y, milestones.
  */
 
 // ===================== CALIBRATION =====================
@@ -438,7 +438,7 @@ export default function PullUpRescueV63(){
   }
 
   function drawActiveCat(ctx,imgs){
-    const c=catRef.current; stepActiveCat(); if(!c) return; if(c.mode==='seated') return; // не рисуем seated на активном слое (исключает idle-моргание)
+    const c=catRef.current; stepActiveCat(); if(!c) return; if(c.mode==='seated') return; // не рисуем seated на активном слое (исключает idle‑моргание)
     const state = c.mode==='attached' ? 'attached' : (c.mode==='falling' ? 'falling' : (c.mode==='landing' ? 'landing' : 'idle'));
     const im = state==='attached' ? imgs.cat_attached : (state==='falling' ? imgs.cat_jump : (state==='landing' ? imgs.cat_land : imgs.cat_idle)); if(!im) return;
     const w = catWidthPx(state); const h = catHeightFor(im,w); const yNudge=(CAT_Y_NUDGE_PX[state]||0)*(window.devicePixelRatio||1);
