@@ -706,12 +706,10 @@ export default function PullUpRescueV63(){
       }
 
       // HUD
-      if(camReady) {
-        try {
-          drawSavedCounter(u,W,H,savedRef.current);
-        } catch(e) {
-          console.warn('Failed to draw HUD:', e);
-        }
+      try {
+        drawSavedCounter(u,W,H,savedRef.current);
+      } catch(e) {
+        console.warn('Failed to draw HUD:', e);
       }
     }catch(e){
       console.error(e); setDebug(`Tick error: ${e?.message||e}`);
