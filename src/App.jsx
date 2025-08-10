@@ -232,14 +232,16 @@ export default function PullUpRescueV63(){
             restartRAF();
           }
           
-          // If camera was previously ready, reactivate it
-          if (camReady) {
+          // Always try to start camera when entering game screen
+          if (!camReady) {
             enableCamera();
           }
           
-          // Spawn cat if sprites are loaded and no cat exists
-          if (Object.keys(imgs).length > 0 && (!catRef.current || !catRef.current.lastT)) {
-            spawnCatCentered();
+          // Spawn cat immediately if sprites are loaded
+          if (Object.keys(imgs).length > 0) {
+            setTimeout(() => {
+              spawnCatCentered();
+            }, 100);
           }
         } catch(e) {
           console.error('Game screen initialization failed:', e);
@@ -362,128 +364,143 @@ export default function PullUpRescueV63(){
 
   // ===== Camera enumerate & switch =====
   function toBuckets(devices){
-    const vids=devices.filter(d=>d.kind==='videoinput');
-    const fronts=vids.filter(d=>isFrontLabel(d.label||''));
-    const backs = vids.filter(d=>!isFrontLabel(d.label||''));
-    const ultra = vids.find(d=>isUltraLabel(d.label||''));
-    const wide  = backs.find(d=>!isTeleLabel(d.label||'')) || backs[0] || null;
-    return { ultra: ultra?.deviceId||null, wide: wide?.deviceId||null, front: fronts[0]?.deviceId||null };
+    const buckets = {};
+    
+    devices.forEach(device => {
+      if(device.kind === 'videoinput') {
+        const label = device.label.toLowerCase();
+        
+        if(/front|user|face/i.test(label)) {
+          buckets.front = device;
+        } else if(/back|rear/i.test(label)) {
+          buckets.back = device;
+        } else if(/ultra\s*wide|0\.5x|ultra/i.test(label)) {
+          buckets.ultra = device;
+        } else if(/wide|1x/i.test(label)) {
+          buckets.wide = device;
+        } else {
+          // Default to wide if no specific category
+          buckets.wide = device;
+        }
+      }
+    });
+    
+    return buckets;
   }
 
   async function enableCamera(){
-    // Prevent multiple calls
-    if (camReady) return;
-    
-    setDebug('');
-    try{
-      await ensureDetector();
-      const pre=await navigator.mediaDevices.getUserMedia({video:true,audio:false});
-      const devices=await navigator.mediaDevices.enumerateDevices();
-      pre.getTracks().forEach(t=>t.stop());
-      const buckets=toBuckets(devices); 
-      setBucketMap(buckets); 
-      bucketMapRef.current=buckets;
-      const preferred=buckets.ultra?'ultra':(buckets.wide?'wide':'front');
-      await switchToBucket(preferred, buckets);
+    try {
+      if(streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+      
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices.filter(device => device.kind === 'videoinput');
+      
+      if(videoDevices.length === 0) {
+        setMsg('Камера не найдена');
+        return;
+      }
+      
+      // Create bucket map if not exists
+      if(!bucketMapRef.current) {
+        bucketMapRef.current = toBuckets(videoDevices);
+      }
+      
+      // Auto-select front camera if available, otherwise first available
+      let selectedBucket = 'front';
+      if(!bucketMapRef.current.front && bucketMapRef.current.back) {
+        selectedBucket = 'back';
+      } else if(!bucketMapRef.current.front && !bucketMapRef.current.back && bucketMapRef.current.ultra) {
+        selectedBucket = 'ultra';
+      } else if(!bucketMapRef.current.front && !bucketMapRef.current.back && !bucketMapRef.current.ultra && bucketMapRef.current.wide) {
+        selectedBucket = 'wide';
+      }
+      
+      if(bucketMapRef.current[selectedBucket]) {
+        await switchToBucket(selectedBucket);
+        setBucketChoice(selectedBucket);
+      } else {
+        // Fallback to first available camera
+        const firstBucket = Object.keys(bucketMapRef.current)[0];
+        if(firstBucket) {
+          await switchToBucket(firstBucket);
+          setBucketChoice(firstBucket);
+        }
+      }
       
       // Ensure barY is set if not already set
       if (barYRef.current === null) {
         const mid = Math.floor((uiRef.current?.height || window.innerHeight) * 0.5);
         setBarY(mid);
         barYRef.current = mid;
-        // Wait a bit for the state to update
-        await new Promise(resolve => setTimeout(resolve, 100));
       }
       
       setCamReady(true);
       
-      // Ensure all elements are properly initialized
+      // Faster initialization
       setTimeout(() => {
         try {
           updateGeom();
           // Ensure RAF is running
           if (!rafRef.current) {
-          restartRAF();
+            restartRAF();
           }
-          // Spawn cat after everything is ready
-          if (Object.keys(imgs).length > 0 && barYRef.current !== null) {
+          // Spawn cat immediately after camera is ready
+          if (Object.keys(imgs).length > 0) {
             spawnCatCentered();
           }
         } catch(e) {
           console.error('Post-camera initialization failed:', e);
         }
-      }, 300);
-    }catch(e){ 
-      console.error('Camera initialization failed:', e); 
-      setMsg('Camera init failed.'); 
-      setDebug(`${e.name||'Error'}: ${e.message||e}`); 
+      }, 100); // Reduced from 300ms to 100ms
+      
+    } catch(e) {
+      console.error('Camera initialization failed:', e);
+      setMsg('Ошибка инициализации камеры');
     }
   }
 
   async function switchToBucket(bucket, mapOverride){
-    try{
-      // Don't switch if camera is not ready
-      if (!camReady && !mapOverride) return bucket;
-      
-      const map = mapOverride || bucketMapRef.current || {};
-      const deviceId=map[bucket];
-      const baseConstraints={ width:{ideal:1920}, height:{ideal:1080}, frameRate:{ideal:30, max:60} };
-      let stream;
-      
-      if(deviceId){ 
-        try{ 
-          stream=await navigator.mediaDevices.getUserMedia({ 
-            video:{ deviceId:{ exact: deviceId }, ...baseConstraints }, 
-            audio:false 
-          }); 
-        }catch(e){ 
-          setDebug(`Exact ${bucket} failed: ${e.name}`); 
-        } 
-      }
-      
-      if(!stream){ 
-        try{ 
-          stream=await navigator.mediaDevices.getUserMedia({ video: baseConstraints, audio:false }); 
-        }catch(e){ 
-          try {
-            stream=await navigator.mediaDevices.getUserMedia({ video:true, audio:false }); 
-          } catch(e2) {
-            throw new Error(`Failed to get camera stream: ${e2.message}`);
-          }
-        } 
-      }
-      
+    try {
       if(streamRef.current) {
-        streamRef.current.getTracks().forEach(t=>t.stop());
+        streamRef.current.getTracks().forEach(track => track.stop());
       }
       
-      const v=videoRef.current; 
-      if(!v) throw new Error('Video element not found');
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const buckets = mapOverride || toBuckets(devices);
+      const device = buckets[bucket];
       
-      v.srcObject=stream; 
-      try{ 
-        await v.play(); 
-      }catch(e){
-        console.warn('Video play failed:', e);
+      if(!device) {
+        console.warn(`Camera bucket ${bucket} not found`);
+        return;
       }
       
-      streamRef.current=stream; 
+      const constraints = {
+        video: {
+          deviceId: { exact: device.deviceId },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: false
+      };
       
-      try {
-        setMirrorFromStream(stream); 
-        updateGeom();
-      } catch(e) {
-        console.warn('Failed to set mirror or update geometry:', e);
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      streamRef.current = stream;
+      
+      if(videoRef.current) {
+        videoRef.current.srcObject = stream;
+        setMirrorFromStream(stream);
       }
       
-      const label = stream.getVideoTracks?.()[0]?.label || '';
-      const finalBucket = /front|user|face/i.test(label) ? 'front' : (/ultra\s*wide|0\.5x|ultra/i.test(label) ? 'ultra' : 'wide');
-      setBucketChoice(finalBucket);
-      return finalBucket;
-    }catch(e){ 
-      console.error('Camera switch failed:', e);
-      setDebug(`Switch failed: ${e.name || 'Unknown error'}`); 
-      return bucket; 
+      setBucketChoice(bucket);
+      setMsg(`Камера: ${bucket === 'front' ? 'Фронтальная' : 
+                       bucket === 'back' ? 'Задняя' : 
+                       bucket === 'ultra' ? 'Ультра широкая' : 'Широкая'}`);
+      
+    } catch(e) {
+      console.error(`Failed to switch to camera ${bucket}:`, e);
+      setMsg(`Ошибка переключения на камеру: ${bucket}`);
     }
   }
 
@@ -1262,67 +1279,117 @@ export default function PullUpRescueV63(){
   }
 
   // ===== Render =====
+  const [showCameraMenu, setShowCameraMenu] = useState(false);
   return (
     <div style={{position:'fixed',inset:0,background:'#000',color:'#fff',overflow:'hidden'}}>
       {/* Welcome Screen */}
       {currentScreen === 'welcome' && (
         <div style={{
           minHeight: '100vh',
-          background: 'linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%)',
+          background: 'linear-gradient(135deg, #1e3a8a 0%, #3b82f6 50%, #1e40af 100%)',
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'center',
           justifyContent: 'center',
           padding: '20px',
-          boxSizing: 'border-box'
+          boxSizing: 'border-box',
+          position: 'relative',
+          overflow: 'hidden'
         }}>
-          {/* App Logo */}
+          {/* Animated Background Elements */}
           <div style={{
-            width: '120px',
-            height: '120px',
+            position: 'absolute',
+            top: '10%',
+            left: '10%',
+            width: '100px',
+            height: '100px',
+            background: 'rgba(255,255,255,0.1)',
+            borderRadius: '50%',
+            animation: 'float 6s ease-in-out infinite'
+          }} />
+          <div style={{
+            position: 'absolute',
+            top: '20%',
+            right: '15%',
+            width: '60px',
+            height: '60px',
+            background: 'rgba(255,255,255,0.08)',
+            borderRadius: '50%',
+            animation: 'float 8s ease-in-out infinite reverse'
+          }} />
+          <div style={{
+            position: 'absolute',
+            bottom: '30%',
+            left: '20%',
+            width: '80px',
+            height: '80px',
+            background: 'rgba(255,255,255,0.06)',
+            borderRadius: '50%',
+            animation: 'float 7s ease-in-out infinite'
+          }} />
+
+          {/* App Logo with Animation */}
+          <div style={{
+            width: '140px',
+            height: '140px',
             borderRadius: '50%',
             background: 'linear-gradient(135deg, #3b82f6, #1e3a8a)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            marginBottom: '24px',
-            boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
-            border: '3px solid rgba(255,255,255,0.2)'
+            marginBottom: '32px',
+            boxShadow: '0 20px 60px rgba(0,0,0,0.4)',
+            border: '4px solid rgba(255,255,255,0.3)',
+            animation: 'bounce 2s ease-in-out infinite',
+            position: 'relative'
           }}>
-            <span style={{ fontSize: '60px' }}>🐱</span>
+            <span style={{ fontSize: '70px' }}>🐱</span>
+            <div style={{
+              position: 'absolute',
+              inset: '-8px',
+              borderRadius: '50%',
+              border: '2px solid rgba(255,255,255,0.2)',
+              animation: 'pulse 3s ease-in-out infinite'
+            }} />
           </div>
 
-          {/* App Title */}
+          {/* App Title with Gradient */}
           <h1 style={{
-            fontSize: 'clamp(28px, 6vw, 36px)',
+            fontSize: 'clamp(32px, 8vw, 48px)',
             fontWeight: 'bold',
-            color: '#ffffff',
-            margin: '0 0 16px 0',
+            margin: '0 0 20px 0',
             textAlign: 'center',
-            textShadow: '0 2px 8px rgba(0,0,0,0.3)'
+            textShadow: '0 4px 16px rgba(0,0,0,0.4)',
+            background: 'linear-gradient(135deg, #ffffff, #e0e7ff)',
+            WebkitBackgroundClip: 'text',
+            WebkitTextFillColor: 'transparent',
+            backgroundClip: 'text',
+            animation: 'slideInDown 1s ease-out'
           }}>
             Pull-Up Rescue
           </h1>
 
           {/* App Description */}
           <p style={{
-            fontSize: 'clamp(16px, 4vw, 18px)',
-            color: 'rgba(255,255,255,0.9)',
-            margin: '0 0 40px 0',
+            fontSize: 'clamp(18px, 4vw, 20px)',
+            color: 'rgba(255,255,255,0.95)',
+            margin: '0 0 48px 0',
             textAlign: 'center',
-            lineHeight: '1.5',
-            maxWidth: '400px'
+            lineHeight: '1.6',
+            maxWidth: '500px',
+            animation: 'slideInDown 1s ease-out 0.2s both'
           }}>
             Спаси котиков, выполняя<br />
-            подтягивания!
+            <strong>подтягивания</strong>! 🏋️‍♂️
           </p>
 
           {/* Login Section */}
           {!isLoggedIn && (
             <div style={{
               width: '100%',
-              maxWidth: '320px',
-              marginBottom: '32px'
+              maxWidth: '360px',
+              marginBottom: '40px',
+              animation: 'slideInUp 1s ease-out 0.4s both'
             }}>
               <input
                 type="text"
@@ -1331,40 +1398,54 @@ export default function PullUpRescueV63(){
                 onChange={(e) => setPlayerName(e.target.value)}
                 style={{
                   width: '100%',
-                  padding: '16px',
-                  borderRadius: '12px',
-                  border: 'none',
+                  padding: '18px 20px',
+                  borderRadius: '16px',
+                  border: '2px solid rgba(255,255,255,0.3)',
                   fontSize: '16px',
-                  marginBottom: '16px',
+                  marginBottom: '20px',
                   boxSizing: 'border-box',
-                  boxShadow: '0 4px 16px rgba(0,0,0,0.1)'
+                  boxShadow: '0 8px 32px rgba(0,0,0,0.2)',
+                  background: 'rgba(255,255,255,0.1)',
+                  color: '#ffffff',
+                  backdropFilter: 'blur(10px)',
+                  transition: 'all 0.3s ease'
+                }}
+                onFocus={(e) => {
+                  e.target.style.borderColor = 'rgba(255,255,255,0.6)';
+                  e.target.style.transform = 'scale(1.02)';
+                }}
+                onBlur={(e) => {
+                  e.target.style.borderColor = 'rgba(255,255,255,0.3)';
+                  e.target.style.transform = 'scale(1)';
                 }}
               />
               <button
                 onClick={handleLogin}
                 style={{
                   width: '100%',
-                  padding: '16px',
-                  borderRadius: '12px',
+                  padding: '18px 20px',
+                  borderRadius: '16px',
                   border: 'none',
                   background: 'linear-gradient(135deg, #10b981, #059669)',
                   color: '#ffffff',
-                  fontSize: '16px',
+                  fontSize: '18px',
                   fontWeight: '600',
                   cursor: 'pointer',
-                  transition: 'all 0.2s ease',
-                  boxShadow: '0 4px 16px rgba(16, 185, 129, 0.3)'
+                  transition: 'all 0.3s ease',
+                  boxShadow: '0 8px 32px rgba(16, 185, 129, 0.4)',
+                  position: 'relative',
+                  overflow: 'hidden'
                 }}
                 onMouseEnter={(e) => {
-                  e.target.style.transform = 'translateY(-2px)';
-                  e.target.style.boxShadow = '0 6px 20px rgba(16, 185, 129, 0.4)';
+                  e.target.style.transform = 'translateY(-3px) scale(1.02)';
+                  e.target.style.boxShadow = '0 12px 40px rgba(16, 185, 129, 0.6)';
                 }}
                 onMouseLeave={(e) => {
-                  e.target.style.transform = 'translateY(0)';
-                  e.target.style.boxShadow = '0 4px 16px rgba(16, 185, 129, 0.3)';
+                  e.target.style.transform = 'translateY(0) scale(1)';
+                  e.target.style.boxShadow = '0 8px 32px rgba(16, 185, 129, 0.4)';
                 }}
               >
-                Войти
+                🚀 Войти в игру
               </button>
             </div>
           )}
@@ -1372,70 +1453,93 @@ export default function PullUpRescueV63(){
           {/* Main Navigation Buttons */}
           <div style={{
             width: '100%',
-            maxWidth: '320px',
+            maxWidth: '360px',
             display: 'flex',
             flexDirection: 'column',
-            gap: '16px'
+            gap: '20px',
+            animation: 'slideInUp 1s ease-out 0.6s both'
           }}>
             <button
               onClick={startGame}
               style={{
                 width: '100%',
-                padding: '18px',
-                borderRadius: '12px',
+                padding: '20px 24px',
+                borderRadius: '16px',
                 border: 'none',
                 background: 'linear-gradient(135deg, #f59e0b, #d97706)',
                 color: '#ffffff',
-                fontSize: '18px',
+                fontSize: '20px',
                 fontWeight: '600',
                 cursor: 'pointer',
-                transition: 'all 0.2s ease',
-                boxShadow: '0 4px 16px rgba(245, 158, 11, 0.3)'
+                transition: 'all 0.3s ease',
+                boxShadow: '0 8px 32px rgba(245, 158, 11, 0.4)',
+                position: 'relative',
+                overflow: 'hidden'
               }}
               onMouseEnter={(e) => {
-                e.target.style.transform = 'translateY(-2px)';
-                e.target.style.boxShadow = '0 6px 20px rgba(245, 158, 11, 0.4)';
+                e.target.style.transform = 'translateY(-3px) scale(1.02)';
+                e.target.style.boxShadow = '0 12px 40px rgba(245, 158, 11, 0.6)';
               }}
               onMouseLeave={(e) => {
-                e.target.style.transform = 'translateY(0)';
-                e.target.style.boxShadow = '0 4px 16px rgba(245, 158, 11, 0.3)';
+                e.target.style.transform = 'translateY(0) scale(1)';
+                e.target.style.boxShadow = '0 8px 32px rgba(245, 158, 11, 0.4)';
               }}
             >
-              Начать игру
+              🎮 Начать игру
             </button>
 
             <button
               onClick={showResults}
               style={{
                 width: '100%',
-                padding: '18px',
-                borderRadius: '12px',
-                border: '1px solid rgba(255,255,255,0.3)',
+                padding: '18px 24px',
+                borderRadius: '16px',
+                border: '2px solid rgba(255,255,255,0.3)',
                 background: 'rgba(255,255,255,0.1)',
                 color: '#ffffff',
                 fontSize: '18px',
                 fontWeight: '600',
                 cursor: 'pointer',
-                transition: 'all 0.2s ease',
+                transition: 'all 0.3s ease',
                 backdropFilter: 'blur(10px)',
-                boxShadow: '0 4px 16px rgba(0,0,0,0.1)'
+                boxShadow: '0 8px 32px rgba(0,0,0,0.2)'
               }}
               onMouseEnter={(e) => {
-                e.target.style.transform = 'translateY(-2px)';
+                e.target.style.transform = 'translateY(-3px) scale(1.02)';
                 e.target.style.background = 'rgba(255,255,255,0.2)';
+                e.target.style.borderColor = 'rgba(255,255,255,0.5)';
               }}
               onMouseLeave={(e) => {
-                e.target.style.transform = 'translateY(0)';
+                e.target.style.transform = 'translateY(0) scale(1)';
                 e.target.style.background = 'rgba(255,255,255,0.1)';
+                e.target.style.borderColor = 'rgba(255,255,255,0.3)';
               }}
             >
-              Посмотреть результаты
+              📊 Посмотреть результаты
             </button>
+          </div>
+
+          {/* Footer Info */}
+          <div style={{
+            position: 'absolute',
+            bottom: '20px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            textAlign: 'center',
+            opacity: 0.6,
+            animation: 'slideInUp 1s ease-out 0.8s both'
+          }}>
+            <div style={{ fontSize: '12px', marginBottom: '4px' }}>
+              Используйте TensorFlow.js для распознавания поз
+            </div>
+            <div style={{ fontSize: '10px' }}>
+              Версия 6.3 • Создано с ❤️
+            </div>
           </div>
         </div>
       )}
 
-      {/* Results Screen */}
+      {/* Enhanced Results Screen */}
       {currentScreen === 'results' && (
         <div style={{
           position: 'absolute',
@@ -1446,71 +1550,253 @@ export default function PullUpRescueV63(){
           alignItems: 'center',
           justifyContent: 'center',
           padding: '20px',
-          textAlign: 'center'
+          textAlign: 'center',
+          overflow: 'auto'
         }}>
-          <h1 style={{
-            fontSize: '32px',
-            fontWeight: 'bold',
-            margin: '0 0 30px 0',
-            textShadow: '0 2px 4px rgba(0,0,0,0.3)'
-          }}>
-            Результаты
-          </h1>
-
-          {/* Personal Results */}
+          {/* Header with Animation */}
           <div style={{
-            background: 'rgba(255,255,255,0.1)',
-            padding: '20px',
-            borderRadius: '16px',
-            marginBottom: '20px',
-            backdropFilter: 'blur(10px)',
-            border: '1px solid rgba(255,255,255,0.2)',
-            width: '100%',
-            maxWidth: '320px'
+            marginBottom: '40px',
+            animation: 'slideInDown 0.8s ease-out'
           }}>
-            <h3 style={{ margin: '0 0 15px 0', fontSize: '18px' }}>Личные результаты</h3>
-            <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#22c55e' }}>
-              {saved} котов спасено
-            </div>
-            <div style={{ fontSize: '14px', opacity: 0.7, marginTop: '8px' }}>
-              Лучший результат: 15 котов
-            </div>
-          </div>
-
-          {/* Overall Results */}
-          <div style={{
-            background: 'rgba(255,255,255,0.1)',
-            padding: '20px',
-            borderRadius: '16px',
-            marginBottom: '30px',
-            backdropFilter: 'blur(10px)',
-            border: '1px solid rgba(255,255,255,0.2)',
-            width: '100%',
-            maxWidth: '320px'
-          }}>
-            <h3 style={{ margin: '0 0 15px 0', fontSize: '18px' }}>Общие результаты</h3>
-            <div style={{ fontSize: '16px', lineHeight: '1.6' }}>
-              <div>Всего игроков: 1,247</div>
-              <div>Всего спасено: 8,943 кота</div>
-              <div>Рекорд: 42 кота (Игрок123)</div>
-            </div>
-          </div>
-
-          <button
-            onClick={backToWelcome}
-            style={{
-              padding: '14px 24px',
-              borderRadius: '10px',
-              background: 'rgba(255,255,255,0.1)',
-              color: '#fff',
+            <h1 style={{
+              fontSize: 'clamp(28px, 6vw, 36px)',
+              fontWeight: 'bold',
+              margin: '0 0 16px 0',
+              textShadow: '0 4px 12px rgba(0,0,0,0.3)',
+              background: 'linear-gradient(135deg, #ffffff, #e0e7ff)',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent',
+              backgroundClip: 'text'
+            }}>
+              🎉 Результаты игры!
+            </h1>
+            <p style={{
               fontSize: '16px',
-              cursor: 'pointer',
-              transition: 'all 0.2s ease',
-              border: '1px solid rgba(255,255,255,0.2)'
-            }}
-          >
-            Назад
-          </button>
+              opacity: 0.8,
+              margin: 0,
+              color: '#ffffff'
+            }}>
+              Отличная работа! Вот ваши достижения
+            </p>
+          </div>
+
+          {/* Personal Results Card */}
+          <div style={{
+            background: 'rgba(255,255,255,0.15)',
+            padding: '24px',
+            borderRadius: '20px',
+            marginBottom: '24px',
+            backdropFilter: 'blur(20px)',
+            border: '2px solid rgba(255,255,255,0.3)',
+            width: '100%',
+            maxWidth: '360px',
+            boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+            animation: 'slideInUp 0.8s ease-out 0.2s both'
+          }}>
+            <div style={{
+              width: '80px',
+              height: '80px',
+              borderRadius: '50%',
+              background: 'linear-gradient(135deg, #22c55e, #16a34a)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              margin: '0 auto 20px',
+              fontSize: '40px',
+              boxShadow: '0 8px 32px rgba(34, 197, 94, 0.4)'
+            }}>
+              🐱
+            </div>
+            <h3 style={{ 
+              margin: '0 0 16px 0', 
+              fontSize: '20px',
+              color: '#ffffff',
+              fontWeight: '600'
+            }}>
+              Личные результаты
+            </h3>
+            <div style={{ 
+              fontSize: '36px', 
+              fontWeight: 'bold', 
+              color: '#22c55e',
+              marginBottom: '8px',
+              textShadow: '0 2px 8px rgba(34, 197, 94, 0.5)'
+            }}>
+              {saved} котов
+            </div>
+            <div style={{ 
+              fontSize: '16px', 
+              opacity: 0.8, 
+              marginBottom: '16px',
+              color: '#ffffff'
+            }}>
+              спасено в этой игре
+            </div>
+            
+            {/* Achievement Badge */}
+            {saved >= 10 && (
+              <div style={{
+                background: 'linear-gradient(135deg, #f59e0b, #d97706)',
+                padding: '8px 16px',
+                borderRadius: '20px',
+                fontSize: '14px',
+                fontWeight: '600',
+                color: '#ffffff',
+                display: 'inline-block',
+                boxShadow: '0 4px 16px rgba(245, 158, 11, 0.4)'
+              }}>
+                🏆 Мастер спасатель!
+              </div>
+            )}
+            {saved >= 5 && saved < 10 && (
+              <div style={{
+                background: 'linear-gradient(135deg, #3b82f6, #2563eb)',
+                padding: '8px 16px',
+                borderRadius: '20px',
+                fontSize: '14px',
+                fontWeight: '600',
+                color: '#ffffff',
+                display: 'inline-block',
+                boxShadow: '0 4px 16px rgba(59, 130, 246, 0.4)'
+              }}>
+                🥈 Опытный спасатель
+              </div>
+            )}
+            {saved >= 1 && saved < 5 && (
+              <div style={{
+                background: 'linear-gradient(135deg, #10b981, #059669)',
+                padding: '8px 16px',
+                borderRadius: '20px',
+                fontSize: '14px',
+                fontWeight: '600',
+                color: '#ffffff',
+                display: 'inline-block',
+                boxShadow: '0 4px 16px rgba(16, 185, 129, 0.4)'
+              }}>
+                🥉 Начинающий спасатель
+              </div>
+            )}
+          </div>
+
+          {/* Overall Statistics Card */}
+          <div style={{
+            background: 'rgba(255,255,255,0.1)',
+            padding: '24px',
+            borderRadius: '20px',
+            marginBottom: '32px',
+            backdropFilter: 'blur(20px)',
+            border: '1px solid rgba(255,255,255,0.2)',
+            width: '100%',
+            maxWidth: '360px',
+            animation: 'slideInUp 0.8s ease-out 0.4s both'
+          }}>
+            <h3 style={{ 
+              margin: '0 0 20px 0', 
+              fontSize: '18px',
+              color: '#ffffff',
+              fontWeight: '600'
+            }}>
+              📊 Общая статистика
+            </h3>
+            <div style={{ 
+              fontSize: '16px', 
+              lineHeight: '1.8',
+              color: '#ffffff'
+            }}>
+              <div style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                padding: '8px 0',
+                borderBottom: '1px solid rgba(255,255,255,0.1)'
+              }}>
+                <span>Всего игроков:</span>
+                <span style={{ fontWeight: '600', color: '#3b82f6' }}>1,247</span>
+              </div>
+              <div style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                padding: '8px 0',
+                borderBottom: '1px solid rgba(255,255,255,0.1)'
+              }}>
+                <span>Всего спасено:</span>
+                <span style={{ fontWeight: '600', color: '#22c55e' }}>8,943 кота</span>
+              </div>
+              <div style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                padding: '8px 0'
+              }}>
+                <span>Рекорд:</span>
+                <span style={{ fontWeight: '600', color: '#f59e0b' }}>42 кота</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Action Buttons */}
+          <div style={{
+            display: 'flex',
+            gap: '16px',
+            flexWrap: 'wrap',
+            justifyContent: 'center',
+            animation: 'slideInUp 0.8s ease-out 0.6s both'
+          }}>
+            <button
+              onClick={startGame}
+              style={{
+                padding: '16px 32px',
+                borderRadius: '16px',
+                background: 'linear-gradient(135deg, #22c55e, #16a34a)',
+                color: '#ffffff',
+                fontSize: '16px',
+                fontWeight: '600',
+                cursor: 'pointer',
+                transition: 'all 0.3s ease',
+                border: 'none',
+                boxShadow: '0 8px 32px rgba(34, 197, 94, 0.4)',
+                minWidth: '140px'
+              }}
+              onMouseEnter={(e) => {
+                e.target.style.transform = 'translateY(-3px) scale(1.05)';
+                e.target.style.boxShadow = '0 12px 40px rgba(34, 197, 94, 0.6)';
+              }}
+              onMouseLeave={(e) => {
+                e.target.style.transform = 'translateY(0) scale(1)';
+                e.target.style.boxShadow = '0 8px 32px rgba(34, 197, 94, 0.4)';
+              }}
+            >
+              🎮 Играть снова
+            </button>
+
+            <button
+              onClick={backToWelcome}
+              style={{
+                padding: '16px 32px',
+                borderRadius: '16px',
+                background: 'rgba(255,255,255,0.1)',
+                color: '#ffffff',
+                fontSize: '16px',
+                fontWeight: '600',
+                cursor: 'pointer',
+                transition: 'all 0.3s ease',
+                border: '1px solid rgba(255,255,255,0.3)',
+                backdropFilter: 'blur(10px)',
+                minWidth: '140px'
+              }}
+              onMouseEnter={(e) => {
+                e.target.style.transform = 'translateY(-3px) scale(1.05)';
+                e.target.style.background = 'rgba(255,255,255,0.2)';
+              }}
+              onMouseLeave={(e) => {
+                e.target.style.transform = 'translateY(0) scale(1)';
+                e.target.style.background = 'rgba(255,255,255,0.1)';
+              }}
+            >
+              🏠 Главное меню
+            </button>
+          </div>
         </div>
       )}
 
@@ -1582,7 +1868,105 @@ export default function PullUpRescueV63(){
 
           <canvas ref={recRef} style={{ display: 'none' }} />
 
-          {/* Simple Controls - Semi-transparent */}
+          {/* Enhanced Score Display */}
+          <div style={{
+            position: 'fixed',
+            top: '20px',
+            right: '20px',
+            zIndex: 10,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'flex-end',
+            gap: '12px'
+          }}>
+            {/* Saved Cats Counter */}
+            <div style={{
+              background: 'rgba(0,0,0,0.7)',
+              borderRadius: '20px',
+              padding: '12px 20px',
+              backdropFilter: 'blur(10px)',
+              border: '2px solid rgba(34, 197, 94, 0.5)',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+              transform: saved > 0 ? 'scale(1.05)' : 'scale(1)',
+              transition: 'all 0.3s ease'
+            }}>
+              <div style={{
+                fontSize: '14px',
+                opacity: 0.8,
+                marginBottom: '4px',
+                textAlign: 'center'
+              }}>
+                Спасено котов
+              </div>
+              <div style={{
+                fontSize: '32px',
+                fontWeight: 'bold',
+                color: '#22c55e',
+                textAlign: 'center',
+                textShadow: '0 2px 8px rgba(34, 197, 94, 0.5)'
+              }}>
+                {saved}
+              </div>
+            </div>
+
+            {/* Progress Bar for Next Milestone */}
+            {(() => {
+              const nextMilestone = MILESTONES.find(m => m.at > saved);
+              if (!nextMilestone) return null;
+              
+              const progress = Math.min(saved / nextMilestone.at, 1);
+              const remaining = nextMilestone.at - saved;
+              
+              return (
+                <div style={{
+                  background: 'rgba(0,0,0,0.7)',
+                  borderRadius: '16px',
+                  padding: '12px 16px',
+                  backdropFilter: 'blur(10px)',
+                  border: '1px solid rgba(255,255,255,0.2)',
+                  minWidth: '200px'
+                }}>
+                  <div style={{
+                    fontSize: '12px',
+                    opacity: 0.8,
+                    marginBottom: '8px',
+                    textAlign: 'center'
+                  }}>
+                    До {nextMilestone.at} котов: {remaining} осталось
+                  </div>
+                  <div style={{
+                    width: '100%',
+                    height: '6px',
+                    background: 'rgba(255,255,255,0.2)',
+                    borderRadius: '3px',
+                    overflow: 'hidden'
+                  }}>
+                    <div style={{
+                      width: `${progress * 100}%`,
+                      height: '100%',
+                      background: 'linear-gradient(90deg, #3b82f6, #1d4ed8)',
+                      borderRadius: '3px',
+                      transition: 'width 0.5s ease',
+                      boxShadow: '0 0 10px rgba(59, 130, 246, 0.5)'
+                    }} />
+                  </div>
+                  <div style={{
+                    fontSize: '10px',
+                    opacity: 0.6,
+                    marginTop: '6px',
+                    textAlign: 'center'
+                  }}>
+                    {nextMilestone.action === 'fireworks' ? '🎆 Фейерверк!' :
+                     nextMilestone.action === 'confetti' ? '🎊 Конфетти!' :
+                     nextMilestone.action === 'seatedSwap' ? '🐱 Анимация котов!' :
+                     '🎉 Специальное событие!'}
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* Enhanced Game Controls */}
           <div style={{
             position: 'fixed',
             bottom: '20px',
@@ -1591,63 +1975,90 @@ export default function PullUpRescueV63(){
             zIndex: 10,
             display: 'flex',
             flexDirection: 'column',
-            gap: '8px',
+            gap: '12px',
             alignItems: 'center'
           }}>
-            {/* Camera Selection */}
-            <div style={{
-              display: 'flex',
-              gap: '6px',
-              justifyContent: 'center',
-              marginBottom: '8px'
-            }}>
-              {bucketMap && Object.keys(bucketMap).map((bucket, i) => (
-                <button
-                  key={bucket}
-                  onClick={() => switchToBucket(bucket)}
-                  style={{
-                    ...btn(0.8, bucketChoice === bucket ? 'rgba(34, 197, 94, 0.3)' : 'rgba(0,0,0,0.3)'),
-                    padding: '6px 12px',
-                    fontSize: '12px',
-                    minWidth: '60px'
-                  }}
-                >
-                  {bucket === 'front' ? 'Фронт' : 
-                   bucket === 'back' ? 'Задняя' : 
-                   bucket === 'ultra' ? 'Ультра' : 'Широкая'}
-                </button>
-              ))}
-            </div>
-
             {/* Main Control Buttons */}
             <div style={{
               display: 'flex',
-              gap: '8px',
-              justifyContent: 'center'
+              gap: '12px',
+              justifyContent: 'center',
+              flexWrap: 'wrap'
             }}>
               {!camReady ? (
                 <button onClick={enableCamera} style={{
-                  ...btn(0.9, 'rgba(34, 197, 94, 0.3)'),
-                  padding: '8px 16px',
-                  fontSize: '14px'
-                }}>
-                  Начать игру
+                  background: 'linear-gradient(135deg, #22c55e, #16a34a)',
+                  border: 'none',
+                  borderRadius: '16px',
+                  padding: '12px 24px',
+                  fontSize: '16px',
+                  fontWeight: '600',
+                  color: '#ffffff',
+                  cursor: 'pointer',
+                  transition: 'all 0.3s ease',
+                  boxShadow: '0 4px 20px rgba(34, 197, 94, 0.4)',
+                  minWidth: '100px'
+                }}
+                onMouseEnter={(e) => {
+                  e.target.style.transform = 'translateY(-3px) scale(1.05)';
+                  e.target.style.boxShadow = '0 8px 30px rgba(34, 197, 94, 0.6)';
+                }}
+                onMouseLeave={(e) => {
+                  e.target.style.transform = 'translateY(0) scale(1)';
+                  e.target.style.boxShadow = '0 4px 20px rgba(34, 197, 94, 0.4)';
+                }}
+                >
+                  🚀 Старт
                 </button>
               ) : !recording ? (
                 <button onClick={startRecording} style={{
-                  ...btn(0.9, 'rgba(239, 68, 68, 0.3)'),
-                  padding: '8px 16px',
-                  fontSize: '14px'
-                }}>
-                  Запись
+                  background: 'linear-gradient(135deg, #ef4444, #dc2626)',
+                  border: 'none',
+                  borderRadius: '16px',
+                  padding: '12px 24px',
+                  fontSize: '16px',
+                  fontWeight: '600',
+                  color: '#ffffff',
+                  cursor: 'pointer',
+                  transition: 'all 0.3s ease',
+                  boxShadow: '0 4px 20px rgba(239, 68, 68, 0.4)',
+                  minWidth: '100px'
+                }}
+                onMouseEnter={(e) => {
+                  e.target.style.transform = 'translateY(-3px) scale(1.05)';
+                  e.target.style.boxShadow = '0 8px 30px rgba(239, 68, 68, 0.6)';
+                }}
+                onMouseLeave={(e) => {
+                  e.target.style.transform = 'translateY(0) scale(1)';
+                  e.target.style.boxShadow = '0 4px 20px rgba(239, 68, 68, 0.4)';
+                }}
+                >
+                  🔴 Запись
                 </button>
               ) : (
                 <button onClick={stopRecording} style={{
-                  ...btn(0.9, 'rgba(245, 158, 11, 0.3)'),
-                  padding: '8px 16px',
-                  fontSize: '14px'
-                }}>
-                  Стоп
+                  background: 'linear-gradient(135deg, #f59e0b, #d97706)',
+                  border: 'none',
+                  borderRadius: '16px',
+                  padding: '12px 24px',
+                  fontSize: '16px',
+                  fontWeight: '600',
+                  color: '#ffffff',
+                  cursor: 'pointer',
+                  transition: 'all 0.3s ease',
+                  boxShadow: '0 4px 20px rgba(245, 158, 11, 0.4)',
+                  minWidth: '100px'
+                }}
+                onMouseEnter={(e) => {
+                  e.target.style.transform = 'translateY(-3px) scale(1.05)';
+                  e.target.style.boxShadow = '0 8px 30px rgba(245, 158, 11, 0.6)';
+                }}
+                onMouseLeave={(e) => {
+                  e.target.style.transform = 'translateY(0) scale(1)';
+                  e.target.style.boxShadow = '0 4px 20px rgba(245, 158, 11, 0.4)';
+                }}
+                >
+                  ⏹️ Стоп
                 </button>
               )}
 
@@ -1664,89 +2075,404 @@ export default function PullUpRescueV63(){
                   console.error('Reset failed:', e);
                 }
               }} style={{
-                ...btn(0.9, 'rgba(107, 114, 128, 0.3)'),
-                padding: '8px 16px',
-                fontSize: '14px'
-              }}>
-                Сброс
+                background: 'linear-gradient(135deg, #6b7280, #4b5563)',
+                border: 'none',
+                borderRadius: '16px',
+                padding: '12px 24px',
+                fontSize: '16px',
+                fontWeight: '600',
+                color: '#ffffff',
+                cursor: 'pointer',
+                transition: 'all 0.3s ease',
+                boxShadow: '0 4px 20px rgba(107, 114, 128, 0.4)',
+                minWidth: '100px'
+              }}
+              onMouseEnter={(e) => {
+                e.target.style.transform = 'translateY(-3px) scale(1.05)';
+                e.target.style.boxShadow = '0 8px 30px rgba(107, 114, 128, 0.6)';
+              }}
+              onMouseLeave={(e) => {
+                e.target.style.transform = 'translateY(0) scale(1)';
+                e.target.style.boxShadow = '0 4px 20px rgba(107, 114, 128, 0.4)';
+              }}
+              >
+                🔄 Заново
               </button>
+
+              <button onClick={backToWelcome} style={{
+                background: 'linear-gradient(135deg, #374151, #1f2937)',
+                border: 'none',
+                borderRadius: '16px',
+                padding: '12px 24px',
+                fontSize: '16px',
+                fontWeight: '600',
+                color: '#ffffff',
+                cursor: 'pointer',
+                transition: 'all 0.3s ease',
+                boxShadow: '0 4px 20px rgba(0,0,0,0.4)',
+                minWidth: '100px'
+              }}
+              onMouseEnter={(e) => {
+                e.target.style.transform = 'translateY(-3px) scale(1.05)';
+                e.target.style.boxShadow = '0 8px 30px rgba(0,0,0,0.6)';
+              }}
+              onMouseLeave={(e) => {
+                e.target.style.transform = 'translateY(0) scale(1)';
+                e.target.style.boxShadow = '0 4px 20px rgba(0,0,0,0.4)';
+              }}
+              >
+                🏠 Меню
+              </button>
+
+              {/* Enhanced Camera Dropdown Button */}
+              <div style={{ position: 'relative' }}>
+                <button 
+                  onClick={() => setShowCameraMenu(!showCameraMenu)}
+                  style={{
+                    background: 'linear-gradient(135deg, #3b82f6, #2563eb)',
+                    border: 'none',
+                    borderRadius: '16px',
+                    padding: '12px 24px',
+                    fontSize: '16px',
+                    fontWeight: '600',
+                    color: '#ffffff',
+                    cursor: 'pointer',
+                    transition: 'all 0.3s ease',
+                    boxShadow: '0 4px 20px rgba(59, 130, 246, 0.4)',
+                    minWidth: '100px'
+                  }}
+                  onMouseEnter={(e) => {
+                    e.target.style.transform = 'translateY(-3px) scale(1.05)';
+                    e.target.style.boxShadow = '0 8px 30px rgba(59, 130, 246, 0.6)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.target.style.transform = 'translateY(0) scale(1)';
+                    e.target.style.boxShadow = '0 4px 20px rgba(59, 130, 246, 0.4)';
+                  }}
+                >
+                  📷 Камера
+                </button>
+                
+                {/* Enhanced Camera Dropdown Menu */}
+                {showCameraMenu && (
+                  <div style={{
+                    position: 'absolute',
+                    bottom: '100%',
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    marginBottom: '12px',
+                    background: 'rgba(0,0,0,0.9)',
+                    borderRadius: '16px',
+                    padding: '12px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '8px',
+                    minWidth: '160px',
+                    zIndex: 20,
+                    backdropFilter: 'blur(20px)',
+                    border: '1px solid rgba(255,255,255,0.2)',
+                    boxShadow: '0 20px 60px rgba(0,0,0,0.5)'
+                  }}>
+                    {bucketMap && Object.keys(bucketMap).map((bucket) => (
+                      <button
+                        key={bucket}
+                        onClick={() => {
+                          switchToBucket(bucket);
+                          setShowCameraMenu(false);
+                        }}
+                        style={{
+                          background: bucketChoice === bucket 
+                            ? 'linear-gradient(135deg, #22c55e, #16a34a)' 
+                            : 'rgba(255,255,255,0.1)',
+                          border: 'none',
+                          borderRadius: '12px',
+                          padding: '10px 16px',
+                          fontSize: '14px',
+                          fontWeight: '500',
+                          color: '#ffffff',
+                          cursor: 'pointer',
+                          transition: 'all 0.2s ease',
+                          textAlign: 'left',
+                          width: '100%',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px'
+                        }}
+                        onMouseEnter={(e) => {
+                          if (bucketChoice !== bucket) {
+                            e.target.style.background = 'rgba(255,255,255,0.2)';
+                          }
+                        }}
+                        onMouseLeave={(e) => {
+                          if (bucketChoice !== bucket) {
+                            e.target.style.background = 'rgba(255,255,255,0.1)';
+                          }
+                        }}
+                      >
+                        {bucket === 'front' ? '📱 Фронтальная' : 
+                         bucket === 'back' ? '📷 Задняя' : 
+                         bucket === 'ultra' ? '🌅 Ультра широкая' : '📐 Широкая'}
+                        {bucketChoice === bucket && <span style={{ marginLeft: 'auto' }}>✓</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
 
-            {/* Show Pose Option */}
-            {camReady && (
-              <label style={{
+            {/* Enhanced Messages and Status */}
+            <div style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px',
+              alignItems: 'center',
+              maxWidth: '300px'
+            }}>
+              {/* Camera Status Indicator */}
+              <div style={{
                 display: 'flex',
                 alignItems: 'center',
-                gap: '6px',
-                color: '#ffffff',
+                gap: '8px',
+                padding: '8px 16px',
+                borderRadius: '20px',
+                background: camReady 
+                  ? 'rgba(34, 197, 94, 0.2)' 
+                  : 'rgba(239, 68, 68, 0.2)',
+                border: `1px solid ${camReady ? 'rgba(34, 197, 94, 0.5)' : 'rgba(239, 68, 68, 0.5)'}`,
+                color: camReady ? '#22c55e' : '#ef4444',
                 fontSize: '12px',
-                cursor: 'pointer',
-                opacity: 0.8
+                fontWeight: '500'
               }}>
-                <input
-                  type="checkbox"
-                  checked={showPose}
-                  onChange={(e) => {
-                    try {
-                      setShowPose(e.target.checked);
-                    } catch(e) {
-                      console.error('Show pose toggle failed:', e);
-                    }
-                  }}
-                  style={{
-                    width: '14px',
-                    height: '14px',
-                    cursor: 'pointer'
-                  }}
-                />
-                Показать позу
-              </label>
-            )}
+                <div style={{
+                  width: '8px',
+                  height: '8px',
+                  borderRadius: '50%',
+                  background: camReady ? '#22c55e' : '#ef4444',
+                  animation: camReady ? 'pulse 2s infinite' : 'none'
+                }} />
+                {camReady ? 'Камера активна' : 'Камера неактивна'}
+              </div>
 
-            {/* Messages */}
-            <div style={{
-              fontSize: '12px',
-              opacity: 0.8,
-              textAlign: 'center',
-              color: '#ffffff',
-              maxWidth: '250px',
-              wordWrap: 'break-word'
-            }}>
-              {msg}
-            </div>
-            
-            {debug && (
+              {/* Main Message */}
               <div style={{
-                fontSize: '11px',
-                opacity: 0.6,
+                fontSize: '14px',
+                fontWeight: '500',
                 textAlign: 'center',
                 color: '#ffffff',
-                userSelect: 'all',
-                maxWidth: '250px',
-                wordWrap: 'break-word'
+                padding: '12px 20px',
+                background: 'rgba(0,0,0,0.7)',
+                borderRadius: '16px',
+                backdropFilter: 'blur(10px)',
+                border: '1px solid rgba(255,255,255,0.2)',
+                maxWidth: '100%',
+                wordWrap: 'break-word',
+                lineHeight: '1.4'
               }}>
-                {debug}
+                {msg}
               </div>
-            )}
-
-            {/* Back to Menu Button */}
-            <button
-              onClick={backToWelcome}
-              style={{
-                ...btn(0.8, 'rgba(0,0,0,0.3)'),
-                padding: '6px 12px',
-                fontSize: '12px',
-                marginTop: '4px'
-              }}
-            >
-              Меню
-            </button>
+              
+              {/* Debug Info */}
+              {debug && (
+                <div style={{
+                  fontSize: '11px',
+                  opacity: 0.7,
+                  textAlign: 'center',
+                  color: '#ffffff',
+                  padding: '8px 16px',
+                  background: 'rgba(0,0,0,0.5)',
+                  borderRadius: '12px',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  maxWidth: '100%',
+                  wordWrap: 'break-word',
+                  fontFamily: 'monospace',
+                  userSelect: 'all'
+                }}>
+                  {debug}
+                </div>
+              )}
+            </div>
           </div>
         </>
+      )}
+
+      {/* Camera Loading Indicator */}
+      {!camReady && (
+        <div style={{
+          position: 'fixed',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          zIndex: 15,
+          background: 'rgba(0,0,0,0.8)',
+          borderRadius: '20px',
+          padding: '24px',
+          backdropFilter: 'blur(20px)',
+          border: '1px solid rgba(255,255,255,0.2)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: '16px',
+          minWidth: '200px'
+        }}>
+          <div style={{
+            width: '40px',
+            height: '40px',
+            border: '3px solid rgba(59, 130, 246, 0.3)',
+            borderTop: '3px solid #3b82f6',
+            borderRadius: '50%',
+            animation: 'spin 1s linear infinite'
+          }} />
+          <div style={{
+            fontSize: '16px',
+            fontWeight: '600',
+            color: '#ffffff',
+            textAlign: 'center'
+          }}>
+            Инициализация камеры...
+          </div>
+          <div style={{
+            fontSize: '12px',
+            opacity: 0.7,
+            color: '#ffffff',
+            textAlign: 'center'
+          }}>
+            Пожалуйста, разрешите доступ к камере
+          </div>
+        </div>
+      )}
+
+      {/* Game Instructions Overlay */}
+      {camReady && saved === 0 && (
+        <div 
+          data-instructions
+          style={{
+            position: 'fixed',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            zIndex: 15,
+            background: 'rgba(0,0,0,0.9)',
+            borderRadius: '20px',
+            padding: '24px',
+            backdropFilter: 'blur(20px)',
+            border: '2px solid rgba(59, 130, 246, 0.5)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: '16px',
+            maxWidth: '300px',
+            textAlign: 'center',
+            animation: 'slideInUp 0.5s ease-out'
+          }}
+        >
+          <div style={{
+            fontSize: '48px',
+            marginBottom: '8px'
+          }}>
+            🎯
+          </div>
+          <div style={{
+            fontSize: '18px',
+            fontWeight: '600',
+            color: '#ffffff',
+            marginBottom: '8px'
+          }}>
+            Как играть
+          </div>
+          <div style={{
+            fontSize: '14px',
+            color: 'rgba(255,255,255,0.8)',
+            lineHeight: '1.5'
+          }}>
+            1. Встаньте перед камерой<br />
+            2. Возьмитесь за воображаемую перекладину<br />
+            3. Выполняйте подтягивания<br />
+            4. Спасайте котиков!
+          </div>
+          <button
+            onClick={() => {
+              const overlay = document.querySelector('[data-instructions]');
+              if (overlay) overlay.style.display = 'none';
+            }}
+            style={{
+              padding: '8px 16px',
+              borderRadius: '12px',
+              background: 'rgba(59, 130, 246, 0.3)',
+              color: '#ffffff',
+              border: '1px solid rgba(59, 130, 246, 0.5)',
+              cursor: 'pointer',
+              fontSize: '12px',
+              transition: 'all 0.2s ease'
+            }}
+            onMouseEnter={(e) => {
+              e.target.style.background = 'rgba(59, 130, 246, 0.5)';
+            }}
+            onMouseLeave={(e) => {
+              e.target.style.background = 'rgba(59, 130, 246, 0.3)';
+            }}
+          >
+            Понятно!
+          </button>
+        </div>
       )}
     </div>
   );
 }
 
-function btn(opacity=1,bg){ return {border:0,borderRadius:14,padding:'10px 12px',background:bg||'rgba(255,255,255,.12)',color:'#fff',opacity,backdropFilter:'saturate(120%) blur(6px)'}; }
-function Labeled({label,children}){ return (<div><div style={{fontSize:11,opacity:.75,marginBottom:4}}>{label}</div>{children}</div>); }
+// Add CSS animation for camera status indicator and results screen
+const style = document.createElement('style');
+style.textContent = `
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+  
+  @keyframes slideInDown {
+    from {
+      opacity: 0;
+      transform: translateY(-30px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  
+  @keyframes slideInUp {
+    from {
+      opacity: 0;
+      transform: translateY(30px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  
+  @keyframes float {
+    0%, 100% {
+      transform: translateY(0px);
+    }
+    50% {
+      transform: translateY(-20px);
+    }
+  }
+  
+  @keyframes bounce {
+    0%, 20%, 50%, 80%, 100% {
+      transform: translateY(0);
+    }
+    40% {
+      transform: translateY(-10px);
+    }
+    60% {
+      transform: translateY(-5px);
+    }
+  }
+  
+  @keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+  }
+`;
+document.head.appendChild(style);
