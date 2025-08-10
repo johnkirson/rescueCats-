@@ -112,6 +112,7 @@ export default function PullUpRescueV63(){
   const seatedCatsRef=useRef([]);
 
   const lastInferRef=useRef(0); const lastPoseRef=useRef(null);
+  const heartbeatRef=useRef(0);
 
   // ===== Load sprites =====
   const [imgs,setImgs]=useState({});
@@ -156,6 +157,8 @@ export default function PullUpRescueV63(){
           console.warn('Error stopping recorder on cleanup:', e);
         }
       }
+      // Clean up state
+      setMediaRecorder(null);
     };
   }, []);
 
@@ -167,10 +170,20 @@ export default function PullUpRescueV63(){
       [baseRef.current,uiRef.current,recRef.current].forEach(cv=>{
         if(!cv) return; cv.style.width=W+'px'; cv.style.height=H+'px'; cv.width=Math.floor(W*dpr); cv.height=Math.floor(H*dpr);
       });
-      if (uiRef.current && barYRef.current==null) {
-        const mid=Math.floor(uiRef.current.height*0.5); setBarY(mid);
+      if (barYRef.current==null) {
+        const mid=Math.floor((uiRef.current?.height || H)*0.5); 
+        setBarY(mid);
+        barYRef.current = mid;
       }
-      updateGeom(); if(!catRef.current.lastT) spawnCatCentered();
+      updateGeom(); 
+      // Spawn cat if it doesn't exist and camera is ready and sprites are loaded
+      if(!catRef.current.lastT && camReady && Object.keys(imgs).length > 0) {
+        try {
+          spawnCatCentered();
+        } catch(e) {
+          console.error('Spawn cat in resize failed:', e);
+        }
+      }
     };
     resize(); 
     window.addEventListener('resize',resize);
@@ -178,29 +191,46 @@ export default function PullUpRescueV63(){
   },[]);
 
   function updateGeom(){
-    const video=videoRef.current, base=baseRef.current; 
-    if(!video||!base) return;
-    
-    const W=base.width,H=base.height; 
-    const vw=video.videoWidth||1280, vh=video.videoHeight||720;
-    
-    if(vw <= 0 || vh <= 0) {
-      console.warn('Invalid video dimensions:', {vw, vh});
-      return;
-    }
-    
-    const scale=Math.max(W/vw,H/vh); 
-    const dw=vw*scale, dh=vh*scale; 
-    const dx=(W-dw)/2, dy=(H-dh)/2;
-    
-    geomRef.current={...geomRef.current, W,H,vw,vh,scale,dx,dy};
-    
-    const inW=320; 
-    const inH=Math.round(inW*vh/vw)||240; 
-    const c=inferCanvasRef.current; 
-    if(c) {
-      c.width=inW; 
-      c.height=inH;
+    try {
+      const video=videoRef.current, base=baseRef.current; 
+      if(!video||!base) return;
+      
+      const W=base.width,H=base.height; 
+      
+      // Check if video is ready
+      if (!video.videoWidth || !video.videoHeight) {
+        // Use default dimensions if video is not ready
+        const vw=1280, vh=720;
+        const scale=Math.max(W/vw,H/vh); 
+        const dw=vw*scale, dh=vh*scale; 
+        const dx=(W-dw)/2, dy=(H-dh)/2;
+        
+        geomRef.current={...geomRef.current, W,H,vw,vh,scale,dx,dy};
+        return;
+      }
+      
+      const vw=video.videoWidth, vh=video.videoHeight;
+      
+      if(vw <= 0 || vh <= 0) {
+        console.warn('Invalid video dimensions:', {vw, vh});
+        return;
+      }
+      
+      const scale=Math.max(W/vw,H/vh); 
+      const dw=vw*scale, dh=vh*scale; 
+      const dx=(W-dw)/2, dy=(H-dh)/2;
+      
+      geomRef.current={...geomRef.current, W,H,vw,vh,scale,dx,dy};
+      
+      const inW=320; 
+      const inH=Math.round(inW*vh/vw)||240; 
+      const c=inferCanvasRef.current; 
+      if(c) {
+        c.width=inW; 
+        c.height=inH;
+      }
+    } catch(e) {
+      console.error('Update geometry failed:', e);
     }
   }
   function setMirrorFromStream(stream){
@@ -239,6 +269,9 @@ export default function PullUpRescueV63(){
   }
 
   async function enableCamera(){
+    // Prevent multiple calls
+    if (camReady) return;
+    
     setDebug('');
     try{
       await ensureDetector();
@@ -250,8 +283,31 @@ export default function PullUpRescueV63(){
       bucketMapRef.current=buckets;
       const preferred=buckets.ultra?'ultra':(buckets.wide?'wide':'front');
       await switchToBucket(preferred, buckets);
+      
+      // Ensure barY is set if not already set
+      if (barYRef.current === null) {
+        const mid = Math.floor((uiRef.current?.height || window.innerHeight) * 0.5);
+        setBarY(mid);
+        barYRef.current = mid;
+        // Wait a bit for the state to update
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      
       setCamReady(true);
-      restartRAF();
+      
+      // Ensure all elements are properly initialized
+      setTimeout(() => {
+        try {
+          updateGeom();
+          restartRAF();
+          // Spawn cat after everything is ready
+          if (Object.keys(imgs).length > 0) {
+            spawnCatCentered();
+          }
+        } catch(e) {
+          console.error('Post-camera initialization failed:', e);
+        }
+      }, 200);
     }catch(e){ 
       console.error('Camera initialization failed:', e); 
       setMsg('Camera init failed.'); 
@@ -261,6 +317,9 @@ export default function PullUpRescueV63(){
 
   async function switchToBucket(bucket, mapOverride){
     try{
+      // Don't switch if camera is not ready
+      if (!camReady && !mapOverride) return bucket;
+      
       const map = mapOverride || bucketMapRef.current || {};
       const deviceId=map[bucket];
       const baseConstraints={ width:{ideal:1920}, height:{ideal:1080}, frameRate:{ideal:30, max:60} };
@@ -304,8 +363,13 @@ export default function PullUpRescueV63(){
       }
       
       streamRef.current=stream; 
-      setMirrorFromStream(stream); 
-      updateGeom();
+      
+      try {
+        setMirrorFromStream(stream); 
+        updateGeom();
+      } catch(e) {
+        console.warn('Failed to set mirror or update geometry:', e);
+      }
       
       const label = stream.getVideoTracks?.()[0]?.label || '';
       const finalBucket = /front|user|face/i.test(label) ? 'front' : (/ultra\s*wide|0\.5x|ultra/i.test(label) ? 'ultra' : 'wide');
@@ -476,10 +540,16 @@ export default function PullUpRescueV63(){
   }
 
   // ===== RAF watchdog =====
-  const heartbeatRef = useRef(0);
   function restartRAF(){ 
-    cancelAnimationFrame(rafRef.current||0); 
-    rafRef.current = requestAnimationFrame(tick); 
+    // Only restart RAF if camera is ready
+    if (!camReady) return;
+    
+    try {
+      cancelAnimationFrame(rafRef.current||0); 
+      rafRef.current = requestAnimationFrame(tick); 
+    } catch(e) {
+      console.error('Restart RAF failed:', e);
+    }
   }
   
   useEffect(()=>{
@@ -514,9 +584,22 @@ export default function PullUpRescueV63(){
       if(!W) updateGeom();
 
       // camera → base
-      b.clearRect(0,0,W,H); const dw=vw*scale, dh=vh*scale;
-      if(mirrored){ b.save(); b.translate(W,0); b.scale(-1,1); b.drawImage(video, -dx - dw + W, dy, dw, dh); b.restore(); }
-      else { b.drawImage(video, dx, dy, dw, dh); }
+      b.clearRect(0,0,W,H); 
+      
+      // Only draw video if it's ready
+      if (video.videoWidth && video.videoHeight) {
+        const dw=vw*scale, dh=vh*scale;
+        if(mirrored){ b.save(); b.translate(W,0); b.scale(-1,1); b.drawImage(video, -dx - dw + W, dy, dw, dh); b.restore(); }
+        else { b.drawImage(video, dx, dy, dw, dh); }
+      } else {
+        // Draw placeholder when video is not ready
+        b.fillStyle = 'rgba(0,0,0,0.5)';
+        b.fillRect(0, 0, W, H);
+        b.fillStyle = 'rgba(255,255,255,0.3)';
+        b.font = '24px Arial';
+        b.textAlign = 'center';
+        b.fillText('Camera initializing...', W/2, H/2);
+      }
 
       // UI clear
       u.clearRect(0,0,W,H);
@@ -566,22 +649,51 @@ export default function PullUpRescueV63(){
       }
 
       // overlays
-      // Only draw game elements when camera is ready
-      if(camReady) {
-        drawRopeSprite(u,W,H,barYRef.current,imgs.rope);
-        drawThreshold(u,W,H,barYRef.current,sensitivityRef.current);
-        drawSeatedCats(u,imgs);
-        drawActiveCat(u,imgs);
+      // Only draw game elements when camera is ready and sprites are loaded
+      if(camReady && Object.keys(imgs).length > 0) {
+        // Only draw rope and threshold if barY and sensitivity are set
+        if (barYRef.current !== null && sensitivityRef.current !== null) {
+          try {
+            drawRopeSprite(u,W,H,barYRef.current,imgs.rope);
+            drawThreshold(u,W,H,barYRef.current,sensitivityRef.current);
+          } catch(e) {
+            console.warn('Failed to draw rope/threshold:', e);
+          }
+        }
+        
+        try {
+          drawSeatedCats(u,imgs);
+          drawActiveCat(u,imgs);
+        } catch(e) {
+          console.warn('Failed to draw cats:', e);
+        }
+        
+        // Ensure cat exists if camera is ready and sprites are loaded
+        if (!catRef.current.lastT) {
+          try {
+            spawnCatCentered();
+          } catch(e) {
+            console.error('Spawn cat in tick failed:', e);
+          }
+        }
       }
 
       // effects layer
       if(camReady) {
-        drawEffectsLayer(u);
+        try {
+          drawEffectsLayer(u);
+        } catch(e) {
+          console.warn('Failed to draw effects:', e);
+        }
       }
 
       // HUD
       if(camReady) {
-        drawSavedCounter(u,W,H,savedRef.current);
+        try {
+          drawSavedCounter(u,W,H,savedRef.current);
+        } catch(e) {
+          console.warn('Failed to draw HUD:', e);
+        }
       }
     }catch(e){
       console.error(e); setDebug(`Tick error: ${e?.message||e}`);
@@ -613,12 +725,18 @@ export default function PullUpRescueV63(){
   }
 
   function drawRopeSprite(ctx,W,H,y,img){
-    if(!img||y==null) return;
-    const fullW=W*ROPE_SCALE_X; const scaleW=fullW/img.width; const renderW=fullW;
-    const renderH0=img.height*scaleW; const renderH=renderH0*ROPE_SCALE_Y;
-    const baseline=renderH*(1-ROPE_BASELINE_FROM_BOTTOM);
-    const yTop=Math.round(y - baseline); const xLeft=Math.round((W - renderW)/2);
-    ctx.drawImage(img, xLeft, yTop, renderW, renderH);
+    try {
+      if(!img||y==null||!ctx||W<=0||H<=0) return;
+      if(!img.width||!img.height) return;
+      
+      const fullW=W*ROPE_SCALE_X; const scaleW=fullW/img.width; const renderW=fullW;
+      const renderH0=img.height*scaleW; const renderH=renderH0*ROPE_SCALE_Y;
+      const baseline=renderH*(1-ROPE_BASELINE_FROM_BOTTOM);
+      const yTop=Math.round(y - baseline); const xLeft=Math.round((W - renderW)/2);
+      ctx.drawImage(img, xLeft, yTop, renderW, renderH);
+    } catch(e) {
+      console.error('Draw rope sprite failed:', e);
+    }
   }
 
   function catWidthPx(state){ const dpr=window.devicePixelRatio||1; const local=(CAT_PER_STATE_SCALE[state] ?? 1)*CAT_GLOBAL_SCALE; return CAT_BASE_WIDTH_PX * local * dpr; }
@@ -627,7 +745,7 @@ export default function PullUpRescueV63(){
   function spawnCatCentered(){
     try {
       // Don't spawn cat if camera is not ready
-      if(!camReady) return;
+      if (!camReady) return;
       
       const u=uiRef.current; 
       if(!u) return; 
@@ -635,6 +753,12 @@ export default function PullUpRescueV63(){
       const p=window.devicePixelRatio||1; 
       const W=u.width; 
       const y=barYRef.current ?? Math.floor(u.height*0.5);
+      
+      // Don't spawn cat if barY is not set
+      if (y === null) return;
+      
+      // Don't spawn if cat already exists
+      if (catRef.current && catRef.current.lastT) return;
       
       catRef.current={ 
         mode:'idle', 
@@ -672,11 +796,13 @@ export default function PullUpRescueV63(){
       const u=uiRef.current; 
       if(!u) return; 
       
+      const c=catRef.current; 
+      if(!c || !c.lastT) return; // Don't step if cat doesn't exist
+      
       const p=window.devicePixelRatio||1; 
       const H=u.height; 
       const groundY=H-28*p;
       
-      const c=catRef.current; 
       const now=performance.now(); 
       const dt=Math.min(0.05,(now-c.lastT)/1000); 
       c.lastT=now;
@@ -701,7 +827,9 @@ export default function PullUpRescueV63(){
           triggerMilestones(savedRef.current);
           setTimeout(()=>{ 
             try {
-              spawnCatCentered(); 
+              if (camReady && Object.keys(imgs).length > 0) {
+                spawnCatCentered(); 
+              }
             } catch(e) {
               console.error('Spawn cat in timeout failed:', e);
             }
@@ -715,6 +843,11 @@ export default function PullUpRescueV63(){
 
   function placeSeatedCat(u){
     try {
+      if (!u || !u.width || !u.height) {
+        console.warn('Invalid UI element for placing seated cat');
+        return {x: 100, y: 100};
+      }
+      
       const p=window.devicePixelRatio||1; 
       const W=u.width; 
       const H=u.height; 
@@ -739,46 +872,76 @@ export default function PullUpRescueV63(){
   }
 
   function drawSeatedCats(ctx,imgs){
-    const im = imgs.cat_seated; if(!im) return; const w = catWidthPx('seated'); const h = catHeightFor(im,w);
-    const fx=effectsRef.current; const mode=fx.seatedStyle.mode; const t=performance.now()/1000;
-    for(const s of seatedCatsRef.current){
-      let yN=0; if(mode==='dance'){ yN = Math.sin(t*6 + s.x*0.01) * 6 * (window.devicePixelRatio||1); } else if(mode==='chant'){ yN = Math.sin(t*3 + s.x*0.02) * 2 * (window.devicePixelRatio||1); }
-      const yNudge=(CAT_Y_NUDGE_PX.seated||0)*(window.devicePixelRatio||1) + yN;
-      ctx.drawImage(im, Math.round(s.x - w/2), Math.round(s.y - h + yNudge), w, h);
+    try {
+      const im = imgs.cat_seated; if(!im) return; const w = catWidthPx('seated'); const h = catHeightFor(im,w);
+      const fx=effectsRef.current; const mode=fx.seatedStyle.mode; const t=performance.now()/1000;
+      for(const s of seatedCatsRef.current){
+        let yN=0; if(mode==='dance'){ yN = Math.sin(t*6 + s.x*0.01) * 6 * (window.devicePixelRatio||1); } else if(mode==='chant'){ yN = Math.sin(t*3 + s.x*0.02) * 2 * (window.devicePixelRatio||1); }
+        const yNudge=(CAT_Y_NUDGE_PX.seated||0)*(window.devicePixelRatio||1) + yN;
+        ctx.drawImage(im, Math.round(s.x - w/2), Math.round(s.y - h + yNudge), w, h);
+      }
+    } catch(e) {
+      console.error('Draw seated cats failed:', e);
     }
   }
 
   function drawActiveCat(ctx,imgs){
-    const c=catRef.current; stepActiveCat(); if(!c) return; if(c.mode==='seated') return; // не рисуем seated на активном слое (исключает idle‑моргание)
-    const state = c.mode==='attached' ? 'attached' : (c.mode==='falling' ? 'falling' : (c.mode==='landing' ? 'landing' : 'idle'));
-    const im = state==='attached' ? imgs.cat_attached : (state==='falling' ? imgs.cat_jump : (state==='landing' ? imgs.cat_land : imgs.cat_idle)); if(!im) return;
-    const w = catWidthPx(state); const h = catHeightFor(im,w); const yNudge=(CAT_Y_NUDGE_PX[state]||0)*(window.devicePixelRatio||1);
-    ctx.drawImage(im, Math.round(c.x - w/2), Math.round(c.y - h + yNudge), w, h);
+    try {
+      const c=catRef.current; 
+      if(!c || !c.lastT) return; // Don't draw if cat doesn't exist
+      stepActiveCat(); 
+      if(c.mode==='seated') return; // не рисуем seated на активном слое (исключает idle‑моргание)
+      const state = c.mode==='attached' ? 'attached' : (c.mode==='falling' ? 'falling' : (c.mode==='landing' ? 'landing' : 'idle'));
+      const im = state==='attached' ? imgs.cat_attached : (state==='falling' ? imgs.cat_jump : (state==='landing' ? imgs.cat_land : imgs.cat_idle)); if(!im) return;
+      const w = catWidthPx(state); const h = catHeightFor(im,w); const yNudge=(CAT_Y_NUDGE_PX[state]||0)*(window.devicePixelRatio||1);
+      ctx.drawImage(im, Math.round(c.x - w/2), Math.round(c.y - h + yNudge), w, h);
+    } catch(e) {
+      console.error('Draw active cat failed:', e);
+    }
   }
 
   function drawSavedCounter(ctx,W,H,val){
-    const p=window.devicePixelRatio||1; const pad=10*p; const boxW=180*p, boxH=56*p; const x=(W-boxW)/2, y=pad;
-    ctx.save(); ctx.fillStyle='rgba(0,0,0,.35)'; ctx.beginPath(); const r=12*p; roundRect(ctx,x,y,boxW,boxH,r); ctx.fill();
-    ctx.font=`${14*p}px system-ui`; ctx.fillStyle='#fff'; ctx.fillText('Saved', x+14*p, y+20*p);
-    ctx.font=`${28*p}px system-ui`; ctx.fillText(`${val}`, x+14*p, y+44*p); ctx.restore();
+    try {
+      if(!ctx||W<=0||H<=0) return;
+      const p=window.devicePixelRatio||1; const pad=10*p; const boxW=180*p, boxH=56*p; const x=(W-boxW)/2, y=pad;
+      ctx.save(); ctx.fillStyle='rgba(0,0,0,.35)'; ctx.beginPath(); const r=12*p; roundRect(ctx,x,y,boxW,boxH,r); ctx.fill();
+      ctx.font=`${14*p}px system-ui`; ctx.fillStyle='#fff'; ctx.fillText('Saved', x+14*p, y+20*p);
+      ctx.font=`${28*p}px system-ui`; ctx.fillText(`${val}`, x+14*p, y+44*p); ctx.restore();
+    } catch(e) {
+      console.error('Draw saved counter failed:', e);
+    }
   }
-  function roundRect(ctx,x,y,w,h,r){ ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); }
+  function roundRect(ctx,x,y,w,h,r){ 
+    ctx.moveTo(x+r,y); 
+    ctx.arcTo(x+w,y,x+w,y+h,r); 
+    ctx.arcTo(x+w,y+h,x,y+h,r); 
+    ctx.arcTo(x,y+h,x,y,r); 
+    ctx.arcTo(x,y,x+w,y,r); 
+  }
 
   function drawThreshold(ctx,W,H,barY,sensitivity){
-    if(barY==null) return; const p=window.devicePixelRatio||1; const thr=barY - sensitivity;
-    ctx.save(); ctx.setLineDash([16*p, 10*p]); ctx.lineWidth=4*p; ctx.strokeStyle='#00ff88';
-    ctx.beginPath(); ctx.moveTo(0,thr); ctx.lineTo(W,thr); ctx.stroke(); ctx.setLineDash([]);
-    ctx.beginPath(); ctx.arc(W-40*p,thr,10*p,0,Math.PI*2); ctx.fillStyle='#00ff88'; ctx.fill(); ctx.restore();
+    try {
+      if(barY==null||!ctx||W<=0||H<=0) return; 
+      const p=window.devicePixelRatio||1; const thr=barY - sensitivity;
+      ctx.save(); ctx.setLineDash([16*p, 10*p]); ctx.lineWidth=4*p; ctx.strokeStyle='#00ff88';
+      ctx.beginPath(); ctx.moveTo(0,thr); ctx.lineTo(W,thr); ctx.stroke(); ctx.setLineDash([]);
+      ctx.beginPath(); ctx.arc(W-40*p,thr,10*p,0,Math.PI*2); ctx.fillStyle='#00ff88'; ctx.fill(); ctx.restore();
+    } catch(e) {
+      console.error('Draw threshold failed:', e);
+    }
   }
 
   // ===== Interactions (drag rope) =====
   const draggingRef=useRef(false);
   function onPointerDown(e){ 
     try {
+      // Only allow interaction when camera is ready
+      if (!camReady) return;
+      
       const y=getY(e); 
       if(y==null) return; 
       setBarY(y); 
-      if(catRef.current.mode==='idle') alignCatToBar(); 
+      if(catRef.current && catRef.current.mode==='idle') alignCatToBar(); 
       draggingRef.current=true; 
     } catch(e) {
       console.error('Pointer down failed:', e);
@@ -787,11 +950,11 @@ export default function PullUpRescueV63(){
   
   function onPointerMove(e){ 
     try {
-      if(!draggingRef.current) return; 
+      if(!draggingRef.current || !camReady) return; 
       const y=getY(e); 
       if(y==null) return; 
       setBarY(y); 
-      if(catRef.current.mode==='idle') alignCatToBar(); 
+      if(catRef.current && catRef.current.mode==='idle') alignCatToBar(); 
     } catch(e) {
       console.error('Pointer move failed:', e);
     }
@@ -807,8 +970,11 @@ export default function PullUpRescueV63(){
   
   function alignCatToBar(){ 
     try {
+      const c=catRef.current;
+      if(!c || !c.lastT) return; // Don't align if cat doesn't exist
+      
       const p=window.devicePixelRatio||1; 
-      catRef.current.y = (barYRef.current ?? 0) - CAT_BASELINE_ABOVE_ROPE_PX*p; 
+      c.y = (barYRef.current ?? 0) - CAT_BASELINE_ABOVE_ROPE_PX*p; 
     } catch(e) {
       console.error('Align cat failed:', e);
     }
@@ -816,6 +982,9 @@ export default function PullUpRescueV63(){
   
   function onTouchStart(e){ 
     try {
+      // Only allow touch interaction when camera is ready
+      if (!camReady) return;
+      
       e.preventDefault(); 
       onPointerDown(e); 
     } catch(e) {
@@ -825,6 +994,9 @@ export default function PullUpRescueV63(){
   
   function onTouchMove(e){ 
     try {
+      // Only allow touch interaction when camera is ready
+      if (!camReady) return;
+      
       e.preventDefault(); 
       onPointerMove(e); 
     } catch(e) {
@@ -834,6 +1006,9 @@ export default function PullUpRescueV63(){
   
   function onTouchEnd(e){ 
     try {
+      // Only allow touch interaction when camera is ready
+      if (!camReady) return;
+      
       e.preventDefault(); 
       onPointerUp(); 
     } catch(e) {
@@ -843,9 +1018,14 @@ export default function PullUpRescueV63(){
   
   function getY(e){ 
     try {
-      const rect=uiRef.current.getBoundingClientRect(); 
-      const dpr=uiRef.current.width/rect.width; 
-      if(e.touches&&e.touches[0]) return (e.touches[0].clientY-rect.top)*dpr; 
+      const ui = uiRef.current;
+      if (!ui || !ui.width) return null;
+      
+      const rect = ui.getBoundingClientRect(); 
+      if (!rect || rect.width === 0) return null;
+      
+      const dpr = ui.width/rect.width; 
+      if(e.touches && e.touches[0]) return (e.touches[0].clientY-rect.top)*dpr; 
       if(typeof e.clientY==='number') return (e.clientY-rect.top)*dpr; 
       return null; 
     } catch(e) {
@@ -856,6 +1036,7 @@ export default function PullUpRescueV63(){
 
   // ===== Recording =====
   const mediaRecorderRef=useRef(null); const recordedChunksRef=useRef([]);
+  const [mediaRecorder, setMediaRecorder] = useState(null);
   function isiOSSafari(){ return /iP(hone|ad|od)/.test(navigator.userAgent) && /Safari\//.test(navigator.userAgent) && !/CriOS|FxiOS/.test(navigator.userAgent); }
   function pickMime(){
     const prefer = isiOSSafari() ? ['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4'] : [];
@@ -865,7 +1046,7 @@ export default function PullUpRescueV63(){
     return '';
   }
   function startRecording(){
-    if(!canRecord) return; 
+    if(!canRecord || !camReady) return; 
     
     const rec=recRef.current, base=baseRef.current, ui=uiRef.current; 
     if(!rec||!base||!ui) return;
@@ -926,6 +1107,7 @@ export default function PullUpRescueV63(){
     };
     
     mediaRecorderRef.current=mr; 
+    setMediaRecorder(mr);
     try{ 
       mr.start(500); 
     }catch(e){
@@ -934,6 +1116,8 @@ export default function PullUpRescueV63(){
     }
   }
   function stopRecording(){ 
+    if(!camReady) return;
+    
     if(mediaRecorderRef.current && mediaRecorderRef.current.state!=='inactive') {
       try {
         mediaRecorderRef.current.stop(); 
@@ -943,6 +1127,7 @@ export default function PullUpRescueV63(){
     }
     setRecording(false); 
     recordingRef.current=false; 
+    setMediaRecorder(null);
   }
 
   // ===== Render =====
@@ -977,7 +1162,9 @@ export default function PullUpRescueV63(){
             <select value={bucketChoice} onChange={async(e)=>{ 
               try {
                 const b=e.target.value; 
-                await switchToBucket(b); 
+                if (camReady) {
+                  await switchToBucket(b); 
+                }
               } catch(e) {
                 console.error('Camera switch failed:', e);
                 setMsg('Camera switch failed. Please try again.');
@@ -1004,6 +1191,9 @@ export default function PullUpRescueV63(){
           {camReady && (
             <button onClick={()=>{
               try {
+                // Only reset if camera is ready and sprites are loaded
+                if (!camReady || Object.keys(imgs).length === 0) return;
+                
                 savedRef.current=0; 
                 setSaved(0);
                 repRef.current={phase:'down',lastAbove:0,lastRepAt:0};
@@ -1015,6 +1205,21 @@ export default function PullUpRescueV63(){
                   overlay:{active:false,label:'',until:0}, 
                   seatedStyle:{mode:'default',until:0} 
                 };
+                
+                // Reset cat state
+                catRef.current = { 
+                  mode:'idle', 
+                  x:0, 
+                  y:0, 
+                  vx:0, 
+                  vy:0, 
+                  lastT:0, 
+                  attachDy:0, 
+                  belowStart:0, 
+                  maxDepthBelow:0, 
+                  landUntil:0 
+                };
+                
                 spawnCatCentered(); 
                 restartRAF();
               } catch(e) {
@@ -1029,6 +1234,8 @@ export default function PullUpRescueV63(){
             <Labeled label={`Sensitivity (px above rope): ${sensitivity}`}>
               <input type="range" min={8} max={80} step={1} value={sensitivity} onChange={(e)=>{ 
                 try {
+                  if (!camReady) return;
+                  
                   const v=parseInt(e.target.value,10); 
                   if(!isNaN(v)) {
                     setSensitivity(v); 
@@ -1041,6 +1248,8 @@ export default function PullUpRescueV63(){
             <label style={{display:'flex',gap:6,alignItems:'center',fontSize:12,opacity:.85}}>
               <input type="checkbox" checked={showPose} onChange={(e)=>{
                 try {
+                  if (!camReady) return;
+                  
                   setShowPose(e.target.checked);
                 } catch(e) {
                   console.error('Show pose toggle failed:', e);
