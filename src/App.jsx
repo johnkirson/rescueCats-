@@ -393,7 +393,7 @@ export default function PullUpRescueV63(){
           updateGeom();
           // Ensure RAF is running
           if (!rafRef.current) {
-            restartRAF();
+          restartRAF();
           }
           // Spawn cat after everything is ready
           if (Object.keys(imgs).length > 0 && barYRef.current !== null) {
@@ -781,10 +781,10 @@ export default function PullUpRescueV63(){
       }
 
       // HUD
-      try {
-        drawSavedCounter(u,W,H,savedRef.current);
-      } catch(e) {
-        console.warn('Failed to draw HUD:', e);
+        try {
+          drawSavedCounter(u,W,H,savedRef.current);
+        } catch(e) {
+          console.warn('Failed to draw HUD:', e);
       }
     }catch(e){
       console.error(e); setDebug(`Tick error: ${e?.message||e}`);
@@ -1009,9 +1009,9 @@ export default function PullUpRescueV63(){
     try {
       if(!ctx||W<=0||H<=0) return;
       const p=window.devicePixelRatio||1; const pad=10*p; const boxW=180*p, boxH=56*p; const x=(W-boxW)/2, y=pad;
-      ctx.save(); ctx.fillStyle='rgba(0,0,0,.35)'; ctx.beginPath(); const r=12*p; roundRect(ctx,x,y,boxW,boxH,r); ctx.fill();
-      ctx.font=`${14*p}px system-ui`; ctx.fillStyle='#fff'; ctx.fillText('Saved', x+14*p, y+20*p);
-      ctx.font=`${28*p}px system-ui`; ctx.fillText(`${val}`, x+14*p, y+44*p); ctx.restore();
+    ctx.save(); ctx.fillStyle='rgba(0,0,0,.35)'; ctx.beginPath(); const r=12*p; roundRect(ctx,x,y,boxW,boxH,r); ctx.fill();
+    ctx.font=`${14*p}px system-ui`; ctx.fillStyle='#fff'; ctx.fillText('Saved', x+14*p, y+20*p);
+    ctx.font=`${28*p}px system-ui`; ctx.fillText(`${val}`, x+14*p, y+44*p); ctx.restore();
     } catch(e) {
       console.error('Draw saved counter failed:', e);
     }
@@ -1491,341 +1491,236 @@ export default function PullUpRescueV63(){
       {/* Game Screen */}
       {currentScreen === 'game' && (
         <>
-          {/* Game Header */}
+          {/* Simple Game Interface - Full Screen Camera */}
+          <video
+            ref={videoRef}
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              width: '100vw',
+              height: '100vh',
+              objectFit: 'cover',
+              zIndex: 1
+            }}
+            autoPlay
+            playsInline
+            muted
+            onLoadedMetadata={() => { 
+              try {
+                updateGeom(); 
+                if(streamRef.current) setMirrorFromStream(streamRef.current); 
+              } catch(e) {
+                console.error('Video metadata error:', e);
+              }
+            }}
+          />
+          
+          <canvas
+            ref={baseRef}
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              width: '100vw',
+              height: '100vh',
+              zIndex: 2,
+              touchAction: 'none'
+            }}
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onTouchStart={onTouchStart}
+            onTouchMove={onTouchMove}
+            onTouchEnd={onTouchEnd}
+          />
+          
+          <canvas
+            ref={uiRef}
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              width: '100vw',
+              height: '100vh',
+              zIndex: 3,
+              touchAction: 'none'
+            }}
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onTouchStart={onTouchStart}
+            onTouchMove={onTouchMove}
+            onTouchEnd={onTouchEnd}
+          />
+
+          <canvas ref={recRef} style={{ display: 'none' }} />
+
+          {/* Simple Controls - Semi-transparent */}
           <div style={{
             position: 'fixed',
-            top: 0,
-            left: 0,
-            right: 0,
-            zIndex: 1000,
-            background: 'rgba(0,0,0,0.8)',
-            backdropFilter: 'blur(10px)',
-            padding: '12px 20px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            borderBottom: '1px solid rgba(255,255,255,0.1)'
-          }}>
-            <h2 style={{
-              margin: 0,
-              color: '#ffffff',
-              fontSize: '18px',
-              fontWeight: '600'
-            }}>
-              Pull-Up Rescue
-            </h2>
-            
-            <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-              <button
-                onClick={backToWelcome}
-                style={{
-                  padding: '8px 16px',
-                  borderRadius: '8px',
-                  background: 'rgba(255,255,255,0.1)',
-                  color: '#fff',
-                  fontSize: '14px',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s ease',
-                  border: '1px solid rgba(255,255,255,0.2)',
-                  backdropFilter: 'blur(10px)'
-                }}
-                onMouseEnter={(e) => {
-                  e.target.style.background = 'rgba(255,255,255,0.2)';
-                }}
-                onMouseLeave={(e) => {
-                  e.target.style.background = 'rgba(255,255,255,0.1)';
-                }}
-              >
-                Меню
-              </button>
-            </div>
-          </div>
-
-          {/* Main Game Area */}
-          <div style={{
-            marginTop: '60px',
-            position: 'relative',
-            width: '100%',
-            height: 'calc(100vh - 60px)',
+            bottom: '20px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 10,
             display: 'flex',
             flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center'
+            gap: '10px',
+            alignItems: 'center'
           }}>
-            {/* Video and Canvas Container */}
+            {/* Main Control Buttons */}
             <div style={{
-              position: 'relative',
-              width: '100%',
-              maxWidth: '800px',
-              height: '100%',
               display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
+              gap: '10px',
               justifyContent: 'center'
             }}>
-              <video
-                ref={videoRef}
-                style={{
-                  position: 'absolute',
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'cover',
-                  borderRadius: '12px',
-                  display: camReady ? 'block' : 'none'
-                }}
-                autoPlay
-                playsInline
-                muted
-                onLoadedMetadata={() => { 
-                  try {
-                    updateGeom(); 
-                    if(streamRef.current) setMirrorFromStream(streamRef.current); 
-                  } catch(e) {
-                    console.error('Video metadata error:', e);
-                  }
-                }}
-              />
-              
-              <canvas
-                ref={baseRef}
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  width: '100%',
-                  height: '100%',
-                  borderRadius: '12px',
-                  touchAction: 'none'
-                }}
-                onPointerDown={onPointerDown}
-                onPointerMove={onPointerMove}
-                onPointerUp={onPointerUp}
-                onTouchStart={onTouchStart}
-                onTouchMove={onTouchMove}
-                onTouchEnd={onTouchEnd}
-              />
-              
-              <canvas
-                ref={uiRef}
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  width: '100%',
-                  height: '100%',
-                  borderRadius: '12px',
-                  zIndex: 10,
-                  touchAction: 'none'
-                }}
-                onPointerDown={onPointerDown}
-                onPointerMove={onPointerMove}
-                onPointerUp={onPointerUp}
-                onTouchStart={onTouchStart}
-                onTouchMove={onTouchMove}
-                onTouchEnd={onTouchEnd}
-              />
-
-              <canvas ref={recRef} style={{ display: 'none' }} />
-
-              {/* Camera Status Overlay */}
-              {!camReady && (
-                <div style={{
-                  position: 'absolute',
-                  top: '50%',
-                  left: '50%',
-                  transform: 'translate(-50%, -50%)',
-                  background: 'rgba(0,0,0,0.7)',
-                  color: '#ffffff',
-                  padding: '20px 40px',
-                  borderRadius: '12px',
-                  fontSize: '18px',
-                  textAlign: 'center',
-                  backdropFilter: 'blur(10px)',
-                  border: '1px solid rgba(255,255,255,0.2)'
+              {!camReady ? (
+                <button onClick={enableCamera} style={{
+                  ...btn(1, '#22c55e'),
+                  padding: '12px 24px',
+                  fontSize: '16px'
                 }}>
-                  <div style={{ marginBottom: '12px' }}>📹</div>
-                  <div>Камера не запущена</div>
-                  <div style={{ fontSize: '14px', opacity: 0.8, marginTop: '8px' }}>
-                    Нажмите "Начать игру" для запуска
-                  </div>
-                </div>
+                  Начать игру
+                </button>
+              ) : !recording ? (
+                <button onClick={startRecording} style={{
+                  ...btn(1, '#ef4444'),
+                  padding: '12px 24px',
+                  fontSize: '16px'
+                }}>
+                  Начать запись
+                </button>
+              ) : (
+                <button onClick={stopRecording} style={{
+                  ...btn(1, '#f59e0b'),
+                  padding: '12px 24px',
+                  fontSize: '16px'
+                }}>
+                  Остановить запись
+                </button>
               )}
+
+              <button onClick={() => {
+                try {
+                  setSaved(0);
+                  setMsg('Счетчик сброшен');
+                  if (catRef.current) {
+                    catRef.current.lastT = 0;
+                    catRef.current.mode = 'idle';
+                  }
+                  restartRAF();
+                } catch(e) {
+                  console.error('Reset failed:', e);
+                }
+              }} style={{
+                ...btn(1, '#6b7280'),
+                padding: '12px 24px',
+                fontSize: '16px'
+              }}>
+                Сброс
+              </button>
             </div>
 
-            {/* Game Controls */}
-            <div style={{
-              position: 'fixed',
-              bottom: 0,
-              left: 0,
-              right: 0,
-              background: 'rgba(0,0,0,0.9)',
-              backdropFilter: 'blur(20px)',
-              padding: '20px',
-              borderTop: '1px solid rgba(255,255,255,0.1)',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '16px',
-              alignItems: 'center'
-            }}>
-              {/* Main Control Buttons */}
+            {/* Sensitivity and Options */}
+            {camReady && (
               <div style={{
                 display: 'flex',
-                gap: '16px',
-                justifyContent: 'center',
-                width: '100%',
-                maxWidth: '400px'
+                flexDirection: 'column',
+                gap: '8px',
+                alignItems: 'center'
               }}>
-                {!camReady ? (
-                  <button onClick={enableCamera} style={{
-                    ...btn(1, '#22c55e'),
-                    padding: '16px 32px',
-                    fontSize: '16px',
-                    fontWeight: '600',
-                    borderRadius: '12px',
-                    minWidth: '140px'
-                  }}>
-                    Начать игру
-                  </button>
-                ) : !recording ? (
-                  <button onClick={startRecording} style={{
-                    ...btn(1, '#ef4444'),
-                    padding: '16px 32px',
-                    fontSize: '16px',
-                    fontWeight: '600',
-                    borderRadius: '12px',
-                    minWidth: '140px'
-                  }}>
-                    Начать запись
-                  </button>
-                ) : (
-                  <button onClick={stopRecording} style={{
-                    ...btn(1, '#f59e0b'),
-                    padding: '16px 32px',
-                    fontSize: '16px',
-                    fontWeight: '600',
-                    borderRadius: '12px',
-                    minWidth: '140px'
-                  }}>
-                    Остановить запись
-                  </button>
-                )}
-
-                <button onClick={() => {
-                  try {
-                    setSaved(0);
-                    setMsg('Счетчик сброшен');
-                    if (catRef.current) {
-                      catRef.current.lastT = 0;
-                      catRef.current.mode = 'idle';
-                    }
-                    restartRAF();
-                  } catch(e) {
-                    console.error('Reset failed:', e);
-                  }
-                }} style={{
-                  ...btn(1, '#6b7280'),
-                  padding: '16px 32px',
-                  fontSize: '16px',
-                  fontWeight: '600',
-                  borderRadius: '12px',
-                  minWidth: '140px'
-                }}>
-                  Сброс
-                </button>
-              </div>
-
-              {/* Sensitivity and Options */}
-              {camReady && (
                 <div style={{
                   display: 'flex',
-                  flexDirection: 'column',
-                  gap: '12px',
-                  width: '100%',
-                  maxWidth: '400px',
-                  alignItems: 'center'
+                  alignItems: 'center',
+                  gap: '10px'
                 }}>
-                  <div style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '12px',
-                    width: '100%',
-                    justifyContent: 'space-between'
-                  }}>
-                    <span style={{ color: '#ffffff', fontSize: '14px' }}>
-                      Чувствительность (px выше веревки): {sensitivity}
-                    </span>
-                    <input
-                      type="range"
-                      min="10"
-                      max="50"
-                      value={sensitivity}
-                      onChange={(e) => setSensitivity(parseInt(e.target.value))}
-                      style={{
-                        width: '120px',
-                        height: '6px',
-                        borderRadius: '3px',
-                        background: 'rgba(255,255,255,0.2)',
-                        outline: 'none',
-                        cursor: 'pointer'
-                      }}
-                    />
-                  </div>
-
-                  <label style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px',
-                    color: '#ffffff',
-                    fontSize: '14px',
-                    cursor: 'pointer'
-                  }}>
-                    <input
-                      type="checkbox"
-                      checked={showPose}
-                      onChange={(e) => {
-                        try {
-                          setShowPose(e.target.checked);
-                        } catch(e) {
-                          console.error('Show pose toggle failed:', e);
-                        }
-                      }}
-                      style={{
-                        width: '16px',
-                        height: '16px',
-                        cursor: 'pointer'
-                      }}
-                    />
-                    Показать позу
-                  </label>
+                  <span style={{ color: '#ffffff', fontSize: '14px' }}>
+                    Чувствительность: {sensitivity}
+                  </span>
+                  <input
+                    type="range"
+                    min="10"
+                    max="50"
+                    value={sensitivity}
+                    onChange={(e) => setSensitivity(parseInt(e.target.value))}
+                    style={{
+                      width: '100px',
+                      height: '4px',
+                      borderRadius: '2px',
+                      background: 'rgba(255,255,255,0.3)',
+                      outline: 'none',
+                      cursor: 'pointer'
+                    }}
+                  />
                 </div>
-              )}
 
-              {/* Messages */}
+                <label style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  color: '#ffffff',
+                  fontSize: '14px',
+                  cursor: 'pointer'
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={showPose}
+                    onChange={(e) => {
+                      try {
+                        setShowPose(e.target.checked);
+                      } catch(e) {
+                        console.error('Show pose toggle failed:', e);
+                      }
+                    }}
+                    style={{
+                      width: '16px',
+                      height: '16px',
+                      cursor: 'pointer'
+                    }}
+                  />
+                  Показать позу
+                </label>
+              </div>
+            )}
+
+            {/* Messages */}
+            <div style={{
+              fontSize: '14px',
+              opacity: 0.9,
+              textAlign: 'center',
+              color: '#ffffff',
+              maxWidth: '300px',
+              wordWrap: 'break-word'
+            }}>
+              {msg}
+            </div>
+            
+            {debug && (
               <div style={{
-                fontSize: '14px',
-                opacity: 0.85,
+                fontSize: '12px',
+                opacity: 0.7,
                 textAlign: 'center',
                 color: '#ffffff',
-                maxWidth: '400px',
+                userSelect: 'all',
+                maxWidth: '300px',
                 wordWrap: 'break-word'
               }}>
-                {msg}
+                {debug}
               </div>
-              
-              {debug && (
-                <div style={{
-                  fontSize: '12px',
-                  opacity: 0.6,
-                  textAlign: 'center',
-                  color: '#ffffff',
-                  userSelect: 'all',
-                  maxWidth: '400px',
-                  wordWrap: 'break-word'
-                }}>
-                  {debug}
-                </div>
-              )}
-            </div>
+            )}
+
+            {/* Back to Menu Button */}
+            <button
+              onClick={backToWelcome}
+              style={{
+                ...btn(0.8, 'rgba(0,0,0,0.3)'),
+                padding: '8px 16px',
+                fontSize: '14px',
+                marginTop: '10px'
+              }}
+            >
+              Меню
+            </button>
           </div>
         </>
       )}
