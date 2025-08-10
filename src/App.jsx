@@ -172,7 +172,7 @@ export default function PullUpRescueV63(){
   const handleLogin = () => {
     if (playerName.trim()) {
       setIsLoggedIn(true);
-      setMsg(`Welcome, ${playerName}!`);
+      setMsg(`Добро пожаловать!`);
     }
   };
 
@@ -1672,36 +1672,7 @@ export default function PullUpRescueV63(){
               </button>
             </div>
 
-            {/* Show Pose Option */}
-            {camReady && (
-              <label style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                color: '#ffffff',
-                fontSize: '12px',
-                cursor: 'pointer',
-                opacity: 0.8
-              }}>
-                <input
-                  type="checkbox"
-                  checked={showPose}
-                  onChange={(e) => {
-                    try {
-                      setShowPose(e.target.checked);
-                    } catch(e) {
-                      console.error('Show pose toggle failed:', e);
-                    }
-                  }}
-                  style={{
-                    width: '14px',
-                    height: '14px',
-                    cursor: 'pointer'
-                  }}
-                />
-                Показать позу
-              </label>
-            )}
+
 
             {/* Messages */}
             <div style={{
