@@ -27,7 +27,7 @@ export const INFER_EVERY_MS = 70;              // частота инферен�
 // ——— Sprite sizing ———
 export const CAT_BASE_WIDTH_PX = 64;    // базовая логическая ширина спрайтов кота
 export const CAT_GLOBAL_SCALE = 1.5;    // глобальный масштаб всех спрайтов кота
-export const CAT_PER_STATE_SCALE = { idle:1.00, attached:1.00, falling:1.00, landing:1.00, seated:0.90 };
+export const CAT_PER_STATE_SCALE = { idle:1.00, attached:1.00, falling:1.00, landing:1.00, seated:0.65 };
 export const CAT_Y_NUDGE_PX     = { idle:0,    attached:0,    falling:0,    landing:0,    seated:0 };
 
 // ——— Rope scaling (X/Y) ———
@@ -172,7 +172,7 @@ export default function PullUpRescueV63(){
   const handleLogin = () => {
     if (playerName.trim()) {
       setIsLoggedIn(true);
-      setMsg(`Добро пожаловать!`);
+      setMsg(``);
     }
   };
 
@@ -967,8 +967,8 @@ export default function PullUpRescueV63(){
       const W=u.width; 
       const H=u.height; 
       const margin=20*p; 
-      const spacing=56*p; 
-      const baseY=H-28*p;
+      const spacing=40*p; // Уменьшили расстояние между котиками
+      const baseY=H-120*p; // Подняли выше от низа экрана, чтобы не перекрывать кнопки
       
       const count=seatedCatsRef.current.length; 
       const maxPerRow=Math.floor((W-2*margin)/spacing);
@@ -976,7 +976,7 @@ export default function PullUpRescueV63(){
       const col=count%maxPerRow;
       
       const x=margin + col*spacing; 
-      const y=baseY - row*spacing*0.75; 
+      const y=baseY - row*spacing*0.6; // Уменьшили вертикальное расстояние между рядами
       
       return {x,y};
     } catch(e) {
@@ -988,19 +988,16 @@ export default function PullUpRescueV63(){
 
   function drawSeatedCats(ctx,imgs){
     if(!ctx||!seatedCatsRef.current||seatedCatsRef.current.length===0) return;
-    const W=ctx.canvas.width, H=ctx.canvas.height;
-    const dpr=window.devicePixelRatio||1;
     
-    // Position cats higher to avoid overlap with bottom controls
-    const baseY = H * 0.6; // Move from bottom to 60% of screen height
-    
-    seatedCatsRef.current.forEach((cat,i)=>{
-      const x=W*0.1 + (i%3)*W*0.3;
-      const y=baseY + Math.floor(i/3)*80*dpr;
-      const w=catWidthPx('seated')*dpr;
-      const h=catHeightFor(imgs.cat_seated,w);
-      ctx.drawImage(imgs.cat_seated,x-w/2,y-h,w,h);
-    });
+    try {
+      seatedCatsRef.current.forEach((cat)=>{
+        const w=catWidthPx('seated');
+        const h=catHeightFor(imgs.cat_seated,w);
+        ctx.drawImage(imgs.cat_seated, Math.round(cat.x - w/2), Math.round(cat.y - h), w, h);
+      });
+    } catch(e) {
+      console.error('Draw seated cats failed:', e);
+    }
   }
 
   function drawActiveCat(ctx,imgs){
