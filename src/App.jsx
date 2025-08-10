@@ -231,6 +231,16 @@ export default function PullUpRescueV63(){
           if (!rafRef.current) {
             restartRAF();
           }
+          
+          // If camera was previously ready, reactivate it
+          if (camReady) {
+            enableCamera();
+          }
+          
+          // Spawn cat if sprites are loaded and no cat exists
+          if (Object.keys(imgs).length > 0 && (!catRef.current || !catRef.current.lastT)) {
+            spawnCatCentered();
+          }
         } catch(e) {
           console.error('Game screen initialization failed:', e);
         }
@@ -977,17 +987,20 @@ export default function PullUpRescueV63(){
   }
 
   function drawSeatedCats(ctx,imgs){
-    try {
-      const im = imgs.cat_seated; if(!im) return; const w = catWidthPx('seated'); const h = catHeightFor(im,w);
-      const fx=effectsRef.current; const mode=fx.seatedStyle.mode; const t=performance.now()/1000;
-      for(const s of seatedCatsRef.current){
-        let yN=0; if(mode==='dance'){ yN = Math.sin(t*6 + s.x*0.01) * 6 * (window.devicePixelRatio||1); } else if(mode==='chant'){ yN = Math.sin(t*3 + s.x*0.02) * 2 * (window.devicePixelRatio||1); }
-        const yNudge=(CAT_Y_NUDGE_PX.seated||0)*(window.devicePixelRatio||1) + yN;
-        ctx.drawImage(im, Math.round(s.x - w/2), Math.round(s.y - h + yNudge), w, h);
-      }
-    } catch(e) {
-      console.error('Draw seated cats failed:', e);
-    }
+    if(!ctx||!seatedCatsRef.current||seatedCatsRef.current.length===0) return;
+    const W=ctx.canvas.width, H=ctx.canvas.height;
+    const dpr=window.devicePixelRatio||1;
+    
+    // Position cats higher to avoid overlap with bottom controls
+    const baseY = H * 0.6; // Move from bottom to 60% of screen height
+    
+    seatedCatsRef.current.forEach((cat,i)=>{
+      const x=W*0.1 + (i%3)*W*0.3;
+      const y=baseY + Math.floor(i/3)*80*dpr;
+      const w=catWidthPx('seated')*dpr;
+      const h=catHeightFor(imgs.cat_seated,w);
+      ctx.drawImage(imgs.cat_seated,x-w/2,y-h,w,h);
+    });
   }
 
   function drawActiveCat(ctx,imgs){
@@ -1008,10 +1021,23 @@ export default function PullUpRescueV63(){
   function drawSavedCounter(ctx,W,H,val){
     try {
       if(!ctx||W<=0||H<=0) return;
-      const p=window.devicePixelRatio||1; const pad=10*p; const boxW=180*p, boxH=56*p; const x=(W-boxW)/2, y=pad;
-    ctx.save(); ctx.fillStyle='rgba(0,0,0,.35)'; ctx.beginPath(); const r=12*p; roundRect(ctx,x,y,boxW,boxH,r); ctx.fill();
-    ctx.font=`${14*p}px system-ui`; ctx.fillStyle='#fff'; ctx.fillText('Saved', x+14*p, y+20*p);
-    ctx.font=`${28*p}px system-ui`; ctx.fillText(`${val}`, x+14*p, y+44*p); ctx.restore();
+      const p=window.devicePixelRatio||1; 
+      const pad=10*p; 
+      const boxW=180*p, boxH=56*p; 
+      const x=(W-boxW)/2, y=pad;
+      ctx.save(); 
+      ctx.fillStyle='rgba(0,0,0,.35)'; 
+      ctx.beginPath(); 
+      const r=12*p; 
+      roundRect(ctx,x,y,boxW,boxH,r); 
+      ctx.fill();
+      ctx.font=`${14*p}px system-ui`; 
+      ctx.fillStyle='#fff'; 
+      ctx.textAlign='center';
+      ctx.fillText('Saved', x+boxW/2, y+20*p);
+      ctx.font=`${28*p}px system-ui`; 
+      ctx.fillText(`${val}`, x+boxW/2, y+44*p); 
+      ctx.restore();
     } catch(e) {
       console.error('Draw saved counter failed:', e);
     }
@@ -1565,38 +1591,63 @@ export default function PullUpRescueV63(){
             zIndex: 10,
             display: 'flex',
             flexDirection: 'column',
-            gap: '10px',
+            gap: '8px',
             alignItems: 'center'
           }}>
+            {/* Camera Selection */}
+            <div style={{
+              display: 'flex',
+              gap: '6px',
+              justifyContent: 'center',
+              marginBottom: '8px'
+            }}>
+              {bucketMap && Object.keys(bucketMap).map((bucket, i) => (
+                <button
+                  key={bucket}
+                  onClick={() => switchToBucket(bucket)}
+                  style={{
+                    ...btn(0.8, bucketChoice === bucket ? 'rgba(34, 197, 94, 0.3)' : 'rgba(0,0,0,0.3)'),
+                    padding: '6px 12px',
+                    fontSize: '12px',
+                    minWidth: '60px'
+                  }}
+                >
+                  {bucket === 'front' ? 'Фронт' : 
+                   bucket === 'back' ? 'Задняя' : 
+                   bucket === 'ultra' ? 'Ультра' : 'Широкая'}
+                </button>
+              ))}
+            </div>
+
             {/* Main Control Buttons */}
             <div style={{
               display: 'flex',
-              gap: '10px',
+              gap: '8px',
               justifyContent: 'center'
             }}>
               {!camReady ? (
                 <button onClick={enableCamera} style={{
-                  ...btn(1, '#22c55e'),
-                  padding: '12px 24px',
-                  fontSize: '16px'
+                  ...btn(0.9, 'rgba(34, 197, 94, 0.3)'),
+                  padding: '8px 16px',
+                  fontSize: '14px'
                 }}>
                   Начать игру
                 </button>
               ) : !recording ? (
                 <button onClick={startRecording} style={{
-                  ...btn(1, '#ef4444'),
-                  padding: '12px 24px',
-                  fontSize: '16px'
+                  ...btn(0.9, 'rgba(239, 68, 68, 0.3)'),
+                  padding: '8px 16px',
+                  fontSize: '14px'
                 }}>
-                  Начать запись
+                  Запись
                 </button>
               ) : (
                 <button onClick={stopRecording} style={{
-                  ...btn(1, '#f59e0b'),
-                  padding: '12px 24px',
-                  fontSize: '16px'
+                  ...btn(0.9, 'rgba(245, 158, 11, 0.3)'),
+                  padding: '8px 16px',
+                  fontSize: '14px'
                 }}>
-                  Остановить запись
+                  Стоп
                 </button>
               )}
 
@@ -1613,83 +1664,52 @@ export default function PullUpRescueV63(){
                   console.error('Reset failed:', e);
                 }
               }} style={{
-                ...btn(1, '#6b7280'),
-                padding: '12px 24px',
-                fontSize: '16px'
+                ...btn(0.9, 'rgba(107, 114, 128, 0.3)'),
+                padding: '8px 16px',
+                fontSize: '14px'
               }}>
                 Сброс
               </button>
             </div>
 
-            {/* Sensitivity and Options */}
+            {/* Show Pose Option */}
             {camReady && (
-              <div style={{
+              <label style={{
                 display: 'flex',
-                flexDirection: 'column',
-                gap: '8px',
-                alignItems: 'center'
+                alignItems: 'center',
+                gap: '6px',
+                color: '#ffffff',
+                fontSize: '12px',
+                cursor: 'pointer',
+                opacity: 0.8
               }}>
-                <div style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '10px'
-                }}>
-                  <span style={{ color: '#ffffff', fontSize: '14px' }}>
-                    Чувствительность: {sensitivity}
-                  </span>
-                  <input
-                    type="range"
-                    min="10"
-                    max="50"
-                    value={sensitivity}
-                    onChange={(e) => setSensitivity(parseInt(e.target.value))}
-                    style={{
-                      width: '100px',
-                      height: '4px',
-                      borderRadius: '2px',
-                      background: 'rgba(255,255,255,0.3)',
-                      outline: 'none',
-                      cursor: 'pointer'
-                    }}
-                  />
-                </div>
-
-                <label style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  color: '#ffffff',
-                  fontSize: '14px',
-                  cursor: 'pointer'
-                }}>
-                  <input
-                    type="checkbox"
-                    checked={showPose}
-                    onChange={(e) => {
-                      try {
-                        setShowPose(e.target.checked);
-                      } catch(e) {
-                        console.error('Show pose toggle failed:', e);
-                      }
-                    }}
-                    style={{
-                      width: '16px',
-                      height: '16px',
-                      cursor: 'pointer'
-                    }}
-                  />
-                  Показать позу
-                </label>
-              </div>
+                <input
+                  type="checkbox"
+                  checked={showPose}
+                  onChange={(e) => {
+                    try {
+                      setShowPose(e.target.checked);
+                    } catch(e) {
+                      console.error('Show pose toggle failed:', e);
+                    }
+                  }}
+                  style={{
+                    width: '14px',
+                    height: '14px',
+                    cursor: 'pointer'
+                  }}
+                />
+                Показать позу
+              </label>
             )}
 
             {/* Messages */}
             <div style={{
-              fontSize: '14px',
-              opacity: 0.9,
+              fontSize: '12px',
+              opacity: 0.8,
               textAlign: 'center',
               color: '#ffffff',
-              maxWidth: '300px',
+              maxWidth: '250px',
               wordWrap: 'break-word'
             }}>
               {msg}
@@ -1697,12 +1717,12 @@ export default function PullUpRescueV63(){
             
             {debug && (
               <div style={{
-                fontSize: '12px',
-                opacity: 0.7,
+                fontSize: '11px',
+                opacity: 0.6,
                 textAlign: 'center',
                 color: '#ffffff',
                 userSelect: 'all',
-                maxWidth: '300px',
+                maxWidth: '250px',
                 wordWrap: 'break-word'
               }}>
                 {debug}
@@ -1714,9 +1734,9 @@ export default function PullUpRescueV63(){
               onClick={backToWelcome}
               style={{
                 ...btn(0.8, 'rgba(0,0,0,0.3)'),
-                padding: '8px 16px',
-                fontSize: '14px',
-                marginTop: '10px'
+                padding: '6px 12px',
+                fontSize: '12px',
+                marginTop: '4px'
               }}
             >
               Меню
