@@ -566,16 +566,23 @@ export default function PullUpRescueV63(){
       }
 
       // overlays
-      drawRopeSprite(u,W,H,barYRef.current,imgs.rope);
-      drawThreshold(u,W,H,barYRef.current,sensitivityRef.current);
-      drawSeatedCats(u,imgs);
-      drawActiveCat(u,imgs);
+      // Only draw game elements when camera is ready
+      if(camReady) {
+        drawRopeSprite(u,W,H,barYRef.current,imgs.rope);
+        drawThreshold(u,W,H,barYRef.current,sensitivityRef.current);
+        drawSeatedCats(u,imgs);
+        drawActiveCat(u,imgs);
+      }
 
       // effects layer
-      drawEffectsLayer(u);
+      if(camReady) {
+        drawEffectsLayer(u);
+      }
 
       // HUD
-      drawSavedCounter(u,W,H,savedRef.current);
+      if(camReady) {
+        drawSavedCounter(u,W,H,savedRef.current);
+      }
     }catch(e){
       console.error(e); setDebug(`Tick error: ${e?.message||e}`);
     }finally{
@@ -619,6 +626,9 @@ export default function PullUpRescueV63(){
 
   function spawnCatCentered(){
     try {
+      // Don't spawn cat if camera is not ready
+      if(!camReady) return;
+      
       const u=uiRef.current; 
       if(!u) return; 
       
@@ -991,50 +1001,54 @@ export default function PullUpRescueV63(){
           ) : (
             <button onClick={stopRecording} style={btn(1,'#ef4444')}>Stop</button>
           )}
-          <button onClick={()=>{
-            try {
-              savedRef.current=0; 
-              setSaved(0);
-              repRef.current={phase:'down',lastAbove:0,lastRepAt:0};
-              seatedCatsRef.current=[]; 
-              firedMilestonesRef.current=new Set();
-              effectsRef.current={ 
-                fireworks:[], 
-                confetti:[], 
-                overlay:{active:false,label:'',until:0}, 
-                seatedStyle:{mode:'default',until:0} 
-              };
-              spawnCatCentered(); 
-              restartRAF();
-            } catch(e) {
-              console.error('Reset failed:', e);
-              setMsg('Reset failed. Please try again.');
-            }
-          }} style={btn()}>Reset</button>
-        </div>
-        <div style={{display:'grid',gridTemplateColumns:'1fr auto',alignItems:'center',gap:8}}>
-          <Labeled label={`Sensitivity (px above rope): ${sensitivity}`}>
-            <input type="range" min={8} max={80} step={1} value={sensitivity} onChange={(e)=>{ 
+          {camReady && (
+            <button onClick={()=>{
               try {
-                const v=parseInt(e.target.value,10); 
-                if(!isNaN(v)) {
-                  setSensitivity(v); 
+                savedRef.current=0; 
+                setSaved(0);
+                repRef.current={phase:'down',lastAbove:0,lastRepAt:0};
+                seatedCatsRef.current=[]; 
+                firedMilestonesRef.current=new Set();
+                effectsRef.current={ 
+                  fireworks:[], 
+                  confetti:[], 
+                  overlay:{active:false,label:'',until:0}, 
+                  seatedStyle:{mode:'default',until:0} 
+                };
+                spawnCatCentered(); 
+                restartRAF();
+              } catch(e) {
+                console.error('Reset failed:', e);
+                setMsg('Reset failed. Please try again.');
+              }
+            }} style={btn()}>Reset</button>
+          )}
+        </div>
+        {camReady && (
+          <div style={{display:'grid',gridTemplateColumns:'1fr auto',alignItems:'center',gap:8}}>
+            <Labeled label={`Sensitivity (px above rope): ${sensitivity}`}>
+              <input type="range" min={8} max={80} step={1} value={sensitivity} onChange={(e)=>{ 
+                try {
+                  const v=parseInt(e.target.value,10); 
+                  if(!isNaN(v)) {
+                    setSensitivity(v); 
+                  }
+                } catch(e) {
+                  console.error('Sensitivity change failed:', e);
                 }
-              } catch(e) {
-                console.error('Sensitivity change failed:', e);
-              }
-            }} style={{width:'100%'}} />
-          </Labeled>
-          <label style={{display:'flex',gap:6,alignItems:'center',fontSize:12,opacity:.85}}>
-            <input type="checkbox" checked={showPose} onChange={(e)=>{
-              try {
-                setShowPose(e.target.checked);
-              } catch(e) {
-                console.error('Show pose toggle failed:', e);
-              }
-            }} /> Show pose
-          </label>
-        </div>
+              }} style={{width:'100%'}} />
+            </Labeled>
+            <label style={{display:'flex',gap:6,alignItems:'center',fontSize:12,opacity:.85}}>
+              <input type="checkbox" checked={showPose} onChange={(e)=>{
+                try {
+                  setShowPose(e.target.checked);
+                } catch(e) {
+                  console.error('Show pose toggle failed:', e);
+                }
+              }} /> Show pose
+            </label>
+          </div>
+        )}
         <div style={{fontSize:12,opacity:.85,textAlign:'center'}}>{msg}</div>
         {debug && (<div style={{fontSize:10,opacity:.6,textAlign:'center',userSelect:'all'}}>{debug}</div>)}
       </div>
